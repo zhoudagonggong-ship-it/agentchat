@@ -10,6 +10,7 @@ AgentChat 里每一家 Agent 都是一个**适配器**。适配器负责把这�
 | `src/device/codex/` | 官方的 `codex app-server`（JSON-RPC） | 同上；桌面端占着对话时放进 Codex 自己的队列 | 各种审批和提问、和桌面端共用对话 |
 | `src/device/claude/` | 读它的对话记录文件 | 在桌面端窗口里输入；不行就用命令行 `claude -p --resume` | 读文件、用钩子（hooks）把审批送到手机 |
 | `src/device/goose/` | 只读打开它的 SQLite | 在它的窗口里输入（UI Automation）；不行就用 `goose acp` | 自动操作窗口：没人用电脑时才动、做完把焦点还回去 |
+| `src/device/dsh/` | 它的会话缓存 + 追加写的压缩日志（zstd 分块，只解压最新或新加的部分） | AgentChat 自己的 DSH 插件（`plugin/agentchat-bridge.mjs`，装进 DSH 桌面配置）在 DSH 进程里调用它的 `sessionController.prompt`，和窗口里按发送一样；DSH 没运行插件时用官方命令行 `dsh --profile headless --json --session-id` | 窗口不接受自动输入时，用这家 Agent 自己的插件机制 |
 
 ## 1. 先确认这家 Agent 能接
 

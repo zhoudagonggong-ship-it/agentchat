@@ -15,7 +15,7 @@ export type ItemKind = 'message' | 'tool_call' | 'approval_request' | 'artifact'
 
 export interface AgentInfo {
   id: string; // stable per device, e.g. "codex"
-  kind: 'codex' | 'claude-code' | 'opencode' | 'goose';
+  kind: 'codex' | 'claude-code' | 'opencode' | 'goose' | 'dsh';
   label: string; // shown in the UI, e.g. "Codex"
 }
 

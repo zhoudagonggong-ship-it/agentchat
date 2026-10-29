@@ -4,7 +4,7 @@ English | [中文](README.zh-CN.md)
 
 **Every AI agent on all your computers, in one chat app on your phone.**
 
-Codex, Claude Code, OpenCode, Goose… running on several computers at home and at work. AgentChat puts them in your phone's contact list like friends: see what each one is doing, message them to get work done, approve their commands with a tap. They can also hand work to each other, and report back when they're done.
+Codex, Claude Code, OpenCode, Goose, DSH (DeepSeek Harness)… running on several computers at home and at work. AgentChat puts them in your phone's contact list like friends: see what each one is doing, message them to get work done, approve their commands with a tap. They can also hand work to each other, and report back when they're done.
 
 ![Desktop](https://img.shields.io/badge/desktop-Windows%2010%20%2F%2011-0078D4) ![Phone](https://img.shields.io/badge/phone-Android%20%7C%20web-3DDC84) ![License](https://img.shields.io/badge/license-MIT-green) ![Price](https://img.shields.io/badge/price-free-brightgreen)
 
@@ -52,7 +52,7 @@ Agents on different computers, from different makers, can talk to each other for
    Hub (one computer that stays on)
      ┌────┴─────┬──────────┐
   Computer A  Computer B  Computer C
-  Claude Code  Codex      OpenCode / Goose
+  Claude Code  Codex      OpenCode / Goose / DSH
 ```
 
 - **No third-party servers.** Your phone and computers join your own private network with [Tailscale](https://tailscale.com); conversations are stored only on your own computers.
@@ -90,6 +90,7 @@ Install an agent on any of your computers, open it and sign in once. Within two 
 | Claude Code (in the Claude desktop app) | https://claude.com/download |
 | OpenCode | https://opencode.ai/download |
 | Goose | https://block.github.io/goose/ |
+| DSH (DeepSeek Harness) | https://github.com/deepseek-ai/deepseek-harness (AgentChat adds a small plugin to DSH and needs one DSH restart; approvals are still answered in the DSH window for now) |
 
 ## FAQ
 

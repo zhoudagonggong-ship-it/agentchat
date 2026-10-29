@@ -4,7 +4,7 @@
 
 **把你所有电脑上的 AI Agent，装进手机里的一个聊天软件。**
 
-Codex、Claude Code、OpenCode、Goose……分散在家里、公司的好几台电脑上。AgentChat 让它们像好友一样出现在你的手机通讯录里：随时看它们在干什么、发消息让它们干活、替它们点审批。它们之间也能互相派活，做完自动向你汇报。
+Codex、Claude Code、OpenCode、Goose、DSH（DeepSeek Harness）……分散在家里、公司的好几台电脑上。AgentChat 让它们像好友一样出现在你的手机通讯录里：随时看它们在干什么、发消息让它们干活、替它们点审批。它们之间也能互相派活，做完自动向你汇报。
 
 ![平台](https://img.shields.io/badge/电脑-Windows%2010%20%2F%2011-0078D4) ![手机](https://img.shields.io/badge/手机-Android%20%7C%20网页版-3DDC84) ![许可](https://img.shields.io/badge/许可-MIT-green) ![免费](https://img.shields.io/badge/费用-免费-brightgreen)
 
@@ -50,7 +50,7 @@ AgentChat 就是为这些时刻做的。
    主电脑（一台常开的电脑）
      ┌────┴─────┬──────────┐
   电脑 A      电脑 B      电脑 C
-  Claude Code  Codex      OpenCode / Goose
+  Claude Code  Codex      OpenCode / Goose / DSH
 ```
 
 - **不经过任何第三方服务器。** 手机和电脑之间用 [Tailscale](https://tailscale.com) 连成你自己的私有网络，对话记录只存在你自己的电脑上。
@@ -88,6 +88,7 @@ AgentChat 就是为这些时刻做的。
 | Claude Code（在 Claude 桌面版里） | https://claude.com/download |
 | OpenCode | https://opencode.ai/download |
 | Goose | https://block.github.io/goose/ |
+| DSH（DeepSeek Harness） | https://github.com/deepseek-ai/deepseek-harness（AgentChat 会给 DSH 装一个小插件，要重启一次 DSH；DSH 的审批目前还要在 DSH 窗口里点） |
 
 ## 常见问题
 

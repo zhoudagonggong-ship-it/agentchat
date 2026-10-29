@@ -1,11 +1,13 @@
 // Run by src\setup\uninstall.ps1: takes back out of each agent what AgentChat added (Claude Code's hooks, and the
-// AgentChat tool in Claude Code, Codex, OpenCode and Goose), each through the same official way it went in.
+// AgentChat tool in Claude Code, Codex, OpenCode and Goose, its plugin in DSH), each through the same official way it
+// went in.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { findClaudeExe, uninstallHooks } from './device/claude/adapter.ts';
 import { findCodexExe } from './device/codex/adapter.ts';
 import { HINT_FILE as OPENCODE_HINT, uninstallOpenCodeTool } from './device/opencode/adapter.ts';
 import { HINT_FILE as GOOSE_HINT, uninstallGooseTool } from './device/goose/adapter.ts';
+import { uninstallDshPlugin } from './device/dsh/adapter.ts';
 import { TOOL_NAME, uninstallHint } from './device/tool.ts';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -32,6 +34,7 @@ await step('codex tool', async () => {
 });
 await step('opencode tool', () => uninstallOpenCodeTool());
 await step('goose tool', () => uninstallGooseTool());
+await step('dsh plugin', () => uninstallDshPlugin());
 // The note about AgentChat in each agent's global instructions.
 await step('codex note', () => uninstallHint(join(process.env.CODEX_HOME ?? join(homedir(), '.codex'), 'AGENTS.md')));
 await step('opencode note', () => uninstallHint(OPENCODE_HINT));

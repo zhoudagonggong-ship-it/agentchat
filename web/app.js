@@ -655,7 +655,7 @@ const TOOL_NAMES = { shell: '命令', edit: '修改文件', web: '搜索', image
 const TOOL_STATE = { inProgress: '进行中', completed: '', failed: '失败', declined: '已拒绝' };
 const REQ_STATE = { pending: '发送中', queued: '待送达', accepted: '已发送', unknown: '状态未知', failed: '发送失败', cancelled: '已取消' };
 const REQ_ERRORS = [[/waiting_for_window/, '等电脑上的窗口空出来（锁屏、有没发出的草稿或正在使用），会自动发进去'], [/window_unavailable/, '电脑上的窗口两小时都没空出来，没有发送'],
-  [/ambiguous_title/, '电脑上有两个同名对话，请先给其中一个改名'], [/desktop_restart/, '电脑上没有打开 Claude，已用后台方式发送'], [/active writer/i, '对话正被电脑占用'], [/busy_on_computer/, '电脑上正在运行，等这一轮结束再发'], [/claude_not_found/, '电脑上没有找到 Claude Code'], [/opencode_not_running/, '电脑上的 OpenCode 没有打开'], [/goose_not_found/, '电脑上没有找到 Goose，请先打开一次 Goose'], [/goose_background/, '电脑上没有打开 Goose，已用后台方式发送，打开 Goose 就能看到'],[/device_offline/, '设备离线'], [/no_active_turn/, '没有正在运行的任务'], [/approval_not_found/, '审批已失效']];
+  [/ambiguous_title/, '电脑上有两个同名对话，请先给其中一个改名'], [/desktop_restart/, '电脑上没有打开 Claude，已用后台方式发送'], [/active writer/i, '对话正被电脑占用'], [/busy_on_computer/, '电脑上正在运行，等这一轮结束再发'], [/claude_not_found/, '电脑上没有找到 Claude Code'], [/opencode_not_running/, '电脑上的 OpenCode 没有打开'], [/goose_not_found/, '电脑上没有找到 Goose，请先打开一次 Goose'], [/goose_background/, '电脑上没有打开 Goose，已用后台方式发送，打开 Goose 就能看到'], [/dsh_answer_on_computer/, 'DSH 的审批要在电脑上的 DSH 窗口里点'], [/dsh_failed/, 'DSH 没能接下这条消息'],[/device_offline/, '设备离线'], [/no_active_turn/, '没有正在运行的任务'], [/approval_not_found/, '审批已失效']];
 /** A failure in words: ours explained, the agent's own (a model refusing, say) as it gave it. */
 const reqError = (error) => REQ_ERRORS.find(([re]) => re.test(error))?.[1] ?? String(error).slice(0, 200);
 const GAP_MS = 5 * 60_000;
@@ -897,6 +897,8 @@ function approvalHtml(item) {
 }
 
 function approveButtons(item) {
+  // An agent that takes its answers only in its own window (DSH): said so, no buttons that could not work.
+  if (item.data.onComputer) return '<div class="fmeta">这个审批要在电脑上的 Agent 窗口里点</div>';
   const a = `data-session="${esc(item.sessionId)}" data-approve="${esc(item.data.approvalId)}"`;
   if (item.data.kind === 'question') {
     const qs = item.data.questions || [];

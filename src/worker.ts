@@ -16,6 +16,7 @@ import { CodexAdapter, findCodexExe } from './device/codex/adapter.ts';
 import { ClaudeCodeAdapter, findClaudeExe } from './device/claude/adapter.ts';
 import { OpenCodeAdapter, hasOpenCode } from './device/opencode/adapter.ts';
 import { GooseAdapter, hasGoose } from './device/goose/adapter.ts';
+import { DshAdapter, hasDsh } from './device/dsh/adapter.ts';
 import { homedir, hostname } from 'node:os';
 import { WsTransport, type Transport } from './link.ts';
 import { activity, onActivity, recentActivity } from './activity.ts';
@@ -220,7 +221,7 @@ export class Worker {
       if (this.underTray) process.stdout.write('@@alert ' + JSON.stringify(alert) + '\n');
     };
     this.detectAgents();
-    if (!device.agents.length) activity('本机没有找到 Codex、Claude Code、OpenCode 或 Goose');
+    if (!device.agents.length) activity('本机没有找到 Codex、Claude Code、OpenCode、Goose 或 DSH');
     // An agent installed (or first opened) later is picked up without a restart: no timer of its own, it rides on
     // the hub's tick (every 30 s) every DETECT_EVERY_TICKS, and on each reconnect. Looking costs a few file checks.
     let ticks = 0;
@@ -244,6 +245,7 @@ export class Worker {
     if (!device.adapter('claude-code') && existsSync(join(homedir(), '.claude', 'projects'))) found.push(new ClaudeCodeAdapter(findClaudeExe()));
     if (!device.adapter('opencode') && hasOpenCode()) found.push(new OpenCodeAdapter());
     if (!device.adapter('goose') && hasGoose()) found.push(new GooseAdapter(DATA_DIR));
+    if (!device.adapter('dsh') && hasDsh()) found.push(new DshAdapter());
     for (const adapter of found) device.add(adapter);
     const names = found.map((a) => a.info.label);
     if (names.length && device.agents.length > names.length) activity(`发现新的 Agent：${names.join('、')}`);
@@ -578,6 +580,12 @@ export class Worker {
           const gone = new AbortController();
           res.on('close', () => gone.abort());
           return slowReply(res, claude ? claude.hook(body, gone.signal).then((output) => ({ output })) : Promise.resolve({ output: null }));
+        }
+        case '/api/dsh-bridge': {
+          // AgentChat's plugin inside the DSH desktop asks for the next message to send and says how it went.
+          const dsh = this.device?.adapter('dsh') as DshAdapter | undefined;
+          if (!dsh) return reply(404, { error: '这台电脑上没有 DSH' });
+          return dsh.bridge(body).then(({ status, value }) => reply(status, value));
         }
         case '/api/agent': {
           // The AgentChat tool (mcp.ts) of an agent on this computer: the hub lists agents, sends, waits.
