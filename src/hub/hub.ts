@@ -868,9 +868,14 @@ export class Hub {
    * this one takes messages from agents, the chain of hand-offs is short, the sender is not flooding.
    * Returns the depth the new message takes in its chain.
    */
-  private guard(origin: Origin, deviceId: string, agentId: string): number {
+  private guard(origin: Origin, deviceId: string, agentId: string, targetSession?: string): number {
     if (!this.settings().agentLinks) throw new Error('主人在手机上关闭了 Agent 互通');
-    if (deviceId === origin.deviceId && agentId === origin.agentId) throw new Error('不能发给自己');
+    // The same agent may pass word to another of its own existing conversations (say, two Claude Code chats on
+    // one computer), never to the conversation it is working in, nor to "itself" without naming a conversation.
+    if (deviceId === origin.deviceId && agentId === origin.agentId) {
+      const own = this.workingConversation(origin);
+      if (!targetSession || !own || own.id === targetSession) throw new Error('不能发给自己');
+    }
     if (!this.store.acceptsAgents(deviceId, agentId)) throw new Error('主人设置了这个 Agent 不接收其他 Agent 的消息');
     // Counted along the conversation the sender works in: what the owner asked there starts a new chain. With no
     // working conversation to go by, the hand-offs it received lately stand in.
@@ -896,9 +901,12 @@ export class Hub {
     if (!text) throw new Error('消息是空的');
     const to = args.newConversation || args.title || !(typeof args.conversationId === 'string' && this.store.session(args.conversationId))
       ? this.findAgent(args) : null;
-    const depth = to ? this.guard(origin, to.d.id, to.a.id) : (() => {
+    // An existing conversation named by its title is as known as one given by its id: the guard can tell it apart
+    // from the one the sender works in.
+    const named = to && !args.newConversation && !args.title && args.conversation ? this.findTarget(args) : undefined;
+    const depth = to ? this.guard(origin, to.d.id, to.a.id, named) : (() => {
       const s = this.store.session(String(args.conversationId))!;
-      return this.guard(origin, s.deviceId, s.agentId);
+      return this.guard(origin, s.deviceId, s.agentId, s.id);
     })();
     // The conversation the sender works in: its card goes there, and the receiver can follow the message back.
     const from = this.workingConversation(origin);
@@ -1005,7 +1013,11 @@ export class Hub {
     const turnId = this.store.request(requestId)?.turnId;
     const files = turnId ? this.store.turnFiles(targetSessionId, turnId).slice(0, MAX_ATTACHMENTS) : [];
     const result = this.submit(senderSessionId, { requestId: randomUUID().replaceAll('-', ''), op: 'send', text, origin, ...(files.length ? { files } : {}) }, origin);
-    if (typeof result === 'string') return log('hub', `report back to ${sender.title} failed: ${result}`);
+    if (typeof result === 'string') {
+      // The owner sees it too: the sender is left without the outcome it is waiting for.
+      log('hub', `report back to ${sender.title} failed: ${result}`);
+      return activity(`${label} → ${sender.title}：汇报没能发回去（${result}），可以在手机上打开对方对话查看结果`, 'warn');
+    }
     activity(`${label} → ${sender.title}：把汇报发回去了`);
   }
 

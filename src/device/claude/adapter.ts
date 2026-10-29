@@ -261,13 +261,15 @@ export class ClaudeCodeAdapter implements Adapter {
    */
   private sendInWindow(threadId: string, title: string, text: string, requestId: string): Promise<boolean> {
     const previous = this.windowQueues.get(threadId) ?? Promise.resolve(true);
+    // Only what the conversation took after this message came in can be this message (a little slack for clocks).
+    const since = Date.now() - 5_000;
     const run = previous.catch(() => true).then(async () => {
       const deadline = Date.now() + WINDOW_WAIT_MS;
       let told = false;
       let lastReason = '';
       for (;;) {
         // Sent already, by the owner pressing Send on what we put in the box, say: done, never a second time.
-        if (this.inTranscript(threadId, text)) {
+        if (this.inTranscript(threadId, text, since)) {
           this.sink.receipt(requestId, 'accepted');
           return true;
         }
@@ -365,12 +367,13 @@ export class ClaudeCodeAdapter implements Adapter {
 
   /**
    * Whether this message is in the conversation already, sent or queued for after the running turn (Claude Code
-   * records both). Compared by its first characters, spaces aside, in the end of the transcript.
+   * records both), since `since` (ms). Compared spaces aside, by much of its text: messages from agents all begin
+   * with the same mark (「[来自 X「对话」的汇报，经 AgentChat 转发] 你派的「…」), so their first words tell nothing apart.
    */
-  private inTranscript(threadId: string, text: string): boolean {
+  private inTranscript(threadId: string, text: string, since: number): boolean {
     const file = this.files.get(threadId);
     if (!file) return false;
-    const want = text.replace(/\s+/g, '').slice(0, 40);
+    const want = text.replace(/\s+/g, '').slice(0, 400);
     if (!want) return false;
     try {
       const size = statSync(file).size;
@@ -390,6 +393,9 @@ export class ClaudeCodeAdapter implements Adapter {
         } catch {
           continue;
         }
+        // Read newest first: once the entries are older than the message, it is not there.
+        const at = Date.parse(r.timestamp ?? '');
+        if (at < since) break;
         const content = r.type === 'queue-operation' ? r.content : r.type === 'user' ? r.message?.content : null;
         const said = typeof content === 'string' ? content
           : Array.isArray(content) ? content.map((c: any) => (c?.type === 'text' ? c.text : '')).join('') : '';
