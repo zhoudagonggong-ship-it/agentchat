@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A green rounded square with two chat bubbles. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+  <path android:fillColor="#07C160" android:pathData="M24,8h60a16,16 0,0 1,16 16v60a16,16 0,0 1,-16 16h-60a16,16 0,0 1,-16 -16v-60a16,16 0,0 1,16 -16z" />
+  <path android:fillColor="#FFFFFF" android:pathData="M30,32h34a8,8 0,0 1,8 8v16a8,8 0,0 1,-8 8h-20l-10,8v-8h-4a8,8 0,0 1,-8 -8v-16a8,8 0,0 1,8 -8z" />
+  <path android:fillColor="#D5F5E3" android:pathData="M76,48h2a8,8 0,0 1,8 8v14a8,8 0,0 1,-8 8h-2v6l-8,-6h-14a8,8 0,0 1,-6 -3h18a10,10 0,0 0,10 -10z" />
+</vector>

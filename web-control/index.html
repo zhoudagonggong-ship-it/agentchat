@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AllinOne</title>
+  <link rel="stylesheet" href="control.css">
+</head>
+<body>
+  <main id="root">
+    <header class="hero">
+      <div class="hero-text">
+        <div id="name" class="name">…</div>
+        <div id="role" class="role"></div>
+      </div>
+      <span id="badge" class="badge"></span>
+    </header>
+
+    <section id="setup" class="group" hidden>
+      <div class="group-head"><h2 id="setup-title"></h2></div>
+      <div class="list"><div class="row"><div class="grow"><span id="setup-text"></span><div class="sub" id="setup-sub"></div></div><button id="setup-do" class="btn"></button></div></div>
+    </section>
+
+    <section id="first" class="group" hidden>
+      <div class="group-head"><h2 id="first-title">这台电脑平时开着吗？</h2></div>
+      <div class="list"><div class="row"><div class="grow"><span id="first-text"></span><div class="sub" id="first-sub"></div></div></div>
+        <div class="row" id="first-buttons"><button id="first-no" class="btn plain">不是，等别的电脑</button><span class="grow"></span><button id="first-yes" class="btn">是，用它当主电脑</button></div></div>
+    </section>
+
+    <section id="picker" class="group" hidden>
+      <div class="group-head"><h2 id="picker-title">选择主电脑</h2><button id="rediscover" class="link">重新查找</button></div>
+      <p class="hint">主电脑负责连接手机、在电脑之间转发消息，建议选一台常开的电脑。</p>
+      <div id="peers" class="list"></div>
+      <button id="picker-cancel" class="link cancel" hidden>取消</button>
+    </section>
+
+    <section id="no-agents" class="group" hidden>
+      <div class="group-head"><h2>这台电脑上还没有 Agent</h2></div>
+      <p class="hint">装好其中一个，打开并登录一次，2 分钟内会自动出现在手机的「通讯录 → 新的朋友」里。</p>
+      <div class="list">
+        <div class="row"><div class="grow">Codex<div class="sub">OpenAI 的编程 Agent，有 Windows 桌面版</div></div><a class="btn plain" target="_blank" href="https://developers.openai.com/codex">下载</a></div>
+        <div class="row"><div class="grow">Claude Code<div class="sub">Anthropic 的编程 Agent，在 Claude 桌面版里使用</div></div><a class="btn plain" target="_blank" href="https://claude.com/download">下载</a></div>
+        <div class="row"><div class="grow">OpenCode<div class="sub">开源，可接各家模型</div></div><a class="btn plain" target="_blank" href="https://opencode.ai/download">下载</a></div>
+        <div class="row"><div class="grow">Goose<div class="sub">开源，可接各家模型</div></div><a class="btn plain" target="_blank" href="https://block.github.io/goose/">下载</a></div>
+      </div>
+    </section>
+
+    <section id="pending-box" class="group" hidden>
+      <div class="group-head"><h2>请求加入</h2></div>
+      <div id="pending" class="list"></div>
+    </section>
+
+    <section id="members-box" class="group" hidden>
+      <div class="group-head"><h2>设备</h2></div>
+      <div id="members" class="list"></div>
+    </section>
+
+    <section id="phone-box" class="group" hidden>
+      <div class="group-head"><h2>手机</h2></div>
+      <div class="list">
+        <div class="row" id="pair-row"><div class="grow">添加手机<div class="sub">两步：手机装好 Tailscale 并登录同一个账号，再用手机相机扫码</div></div><button id="pair" class="btn">显示二维码</button></div>
+        <div id="pair-box" class="pair" hidden>
+          <ol class="steps">
+            <li>手机上安装 <b>Tailscale</b>（应用商店搜「Tailscale」），打开并登录<b>和电脑同一个账号</b>。</li>
+            <li>用手机相机扫下面的二维码。还没装 AllinOne App 的话，打开的网页会先教你安装，装好就自动配对。</li>
+          </ol>
+          <div id="qr" class="qr"></div><div class="sub">30 分钟内有效，只能用一次</div><span id="pair-link" class="mono"></span></div>
+        <div class="row"><span id="phone-url" class="mono"></span><button id="copy" class="link">复制网址</button></div>
+      </div>
+    </section>
+
+    <section class="group">
+      <div class="group-head"><h2>动态</h2></div>
+      <div id="activity" class="list feed"></div>
+    </section>
+
+    <section class="group">
+      <div class="group-head"><h2>设置</h2></div>
+      <div class="list">
+        <div class="row" id="release-row" hidden><div class="grow">有新版本 <span id="release-version"></span><div class="sub">本机先更新，其他电脑自动跟上</div></div><button id="release-install" class="btn">更新</button></div>
+        <div class="row"><span>主电脑</span><span class="right"><span id="hub-name" class="muted"></span><button id="change-hub" class="link">更换</button></span></div>
+        <label class="row"><span>开机自动启动</span><input id="autostart" type="checkbox" class="switch"></label>
+        <label class="row"><span>暂停</span><input id="paused" type="checkbox" class="switch"></label>
+        <div class="row"><div class="grow">遇到问题<div class="sub">导出一个诊断包到桌面（密码和密钥已去掉），发给帮你看问题的人</div></div><button id="diagnostics" class="btn plain">导出诊断信息</button></div>
+      </div>
+    </section>
+  </main>
+  <script src="vendor/qrcode.js"></script>
+  <script type="module" src="control.js"></script>
+</body>
+</html>

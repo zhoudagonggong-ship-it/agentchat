@@ -1,0 +1,16 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "hub",
+      "runtimeExecutable": "C:\\AllinOneProject\\runtime\\node\\node.exe",
+      "runtimeArgs": ["src/main.ts"],
+      "port": 18811
+    },
+    {
+      "name": "control",
+      "url": "http://127.0.0.1:18812",
+      "port": 18812
+    }
+  ]
+}

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; color: #fff; overflow: hidden;
+      font: 16px/1.5 -apple-system, "PingFang SC", "HarmonyOS Sans SC", sans-serif; }
+    video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    .shade { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none; }
+    .frame { width: min(68vw, 300px); aspect-ratio: 1; border-radius: 24px; box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.55); position: relative; }
+    .frame::before { content: ""; position: absolute; inset: 0; border-radius: 24px; border: 3px solid #07c160; }
+    .tip { position: fixed; left: 0; right: 0; bottom: max(48px, env(safe-area-inset-bottom)); text-align: center; padding: 0 24px; }
+    .tip b { display: block; font-size: 18px; margin-bottom: 4px; }
+    .tip span { color: rgba(255, 255, 255, 0.7); font-size: 14px; }
+    .close { position: fixed; top: max(16px, env(safe-area-inset-top)); left: 16px; width: 40px; height: 40px; border-radius: 20px;
+      border: 0; background: rgba(0, 0, 0, 0.45); color: #fff; font-size: 22px; line-height: 40px; }
+  </style>
+</head>
+<body>
+  <video id="video" playsinline muted></video>
+  <div class="shade"><div class="frame"></div></div>
+  <button class="close" onclick="history.length > 1 ? history.back() : location.replace('setup.html')" aria-label="关闭">×</button>
+  <div class="tip"><b id="title">对准电脑上的二维码</b><span id="sub">在主电脑的「AllinOne」窗口点「添加手机 · 显示二维码」</span></div>
+  <script src="vendor/jsQR.js"></script>
+  <script>
+    // Scans the pairing QR code inside the app: the phone's built-in detector when the WebView has one, jsQR otherwise.
+    const video = document.getElementById('video');
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    let detector = null;
+    let done = false;
+
+    /** The QR code is https://<主电脑>:<port>/pair?code=… (older ones: allinone://pair?…); the app takes the latter. */
+    function appLink(text) {
+      if (/^allinone:\/\/pair\?/.test(text)) return text;
+      try {
+        const u = new URL(text);
+        const code = u.searchParams.get('code');
+        if (u.protocol === 'https:' && u.pathname === '/pair' && code) {
+          return `allinone://pair?hub=${encodeURIComponent(u.hostname)}&port=${u.port || 443}&code=${encodeURIComponent(code)}`;
+        }
+      } catch (e) {}
+      return null;
+    }
+
+    function found(text) {
+      if (done) return;
+      text = appLink(text);
+      if (!text) {
+        document.getElementById('title').textContent = '这不是 AllinOne 的配对码';
+        return;
+      }
+      done = true;
+      document.getElementById('title').textContent = '已识别，正在配对…';
+      document.getElementById('sub').textContent = '';
+      video.srcObject && video.srcObject.getTracks().forEach((t) => t.stop());
+      AllinOneNative.pairLink(text);
+    }
+
+    async function tick() {
+      if (done) return;
+      if (video.readyState >= 2) {
+        try {
+          if (detector) {
+            const codes = await detector.detect(video);
+            if (codes.length) found(codes[0].rawValue);
+          } else {
+            // Decode a centered square, scaled down: fast enough on a phone and matches the frame shown.
+            const side = Math.min(video.videoWidth, video.videoHeight);
+            const size = Math.min(side, 720);
+            canvas.width = canvas.height = size;
+            ctx.drawImage(video, (video.videoWidth - side) / 2, (video.videoHeight - side) / 2, side, side, 0, 0, size, size);
+            const code = jsQR(ctx.getImageData(0, 0, size, size).data, size, size, { inversionAttempts: 'dontInvert' });
+            if (code) found(code.data);
+          }
+        } catch (e) {
+          detector = null; // fall back to jsQR
+        }
+      }
+      setTimeout(tick, 120);
+    }
+
+    async function start() {
+      try {
+        if ('BarcodeDetector' in window && (await BarcodeDetector.getSupportedFormats()).includes('qr_code')) {
+          detector = new BarcodeDetector({ formats: ['qr_code'] });
+        }
+      } catch (e) {
+        detector = null;
+      }
+      try {
+        video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 } }, audio: false });
+        await video.play();
+        tick();
+      } catch (e) {
+        document.getElementById('title').textContent = '无法打开相机';
+        document.getElementById('sub').textContent = '请在系统设置里允许「AllinOne」使用相机';
+      }
+    }
+    start();
+  </script>
+</body>
+</html>

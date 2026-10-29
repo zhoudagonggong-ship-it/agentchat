@@ -1,0 +1,21 @@
+{
+  "name": "allinone",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "在手机上查看和操作每台电脑上的 AI Agent",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24.19.0"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  },
+  "allinone": {
+    "releases": "zhoudagonggong-ship-it/allinone"
+  }
+}

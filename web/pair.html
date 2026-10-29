@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>添加手机 · AllinOne</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #f2f2f7; --card: #fff; --text: #1d1d1f; --muted: #8e8e93; --line: #e5e5ea; --green: #07c160; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #000; --card: #1c1c1e; --text: #f5f5f7; --line: #2c2c2e; } }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 -apple-system, "PingFang SC", "HarmonyOS Sans SC", sans-serif; }
+    main { max-width: 480px; margin: 0 auto; padding: max(24px, env(safe-area-inset-top)) 16px 40px; }
+    h1 { font-size: 24px; margin: 8px 0 4px; }
+    .lead { color: var(--muted); margin: 0 0 20px; }
+    .card { background: var(--card); border-radius: 14px; padding: 18px 16px; margin-bottom: 14px; }
+    .card h2 { font-size: 17px; margin: 0 0 10px; }
+    .btn { display: block; width: 100%; box-sizing: border-box; text-align: center; padding: 13px; border-radius: 12px; border: 0;
+      background: var(--green); color: #fff; font-size: 17px; font-weight: 600; text-decoration: none; }
+    .btn.plain { background: transparent; color: var(--green); border: 1px solid var(--green); }
+    ol { margin: 12px 0 0; padding-left: 22px; }
+    li { margin-bottom: 8px; }
+    .muted { color: var(--muted); font-size: 14px; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>添加这部手机</h1>
+    <p class="lead" id="lead">打开 AllinOne App，就会自动完成配对。</p>
+
+    <div class="card" id="open-card">
+      <a class="btn" id="open" href="#">打开 AllinOne App 完成配对</a>
+      <p class="muted" id="open-hint" style="margin: 10px 0 0">点了没反应，说明还没装 App，看下面的步骤。</p>
+    </div>
+
+    <div class="card" id="install-card">
+      <h2 id="install-title">还没装 AllinOne App？</h2>
+      <a class="btn plain" href="/app.apk" download>下载 App（不到 1 MB）</a>
+      <ol>
+        <li>下载完成后，点通知栏里的「AllinOne.apk」，或在「我的文件 → 下载」里点它。</li>
+        <li>如果提示<b>「出于安全考虑，不允许安装此来源的应用」</b>：点「设置」，打开<b>「允许来自此来源」</b>，再按返回键。</li>
+        <li>点「安装」。如果出现「Play 保护机制」提示，点<b>「仍然安装」</b>（App 是你自己电脑上发出的，没有上架应用商店）。</li>
+        <li>装好后回到这个页面，点绿色按钮「打开 AllinOne App 完成配对」。</li>
+      </ol>
+    </div>
+
+    <div class="card" id="ios-card" hidden>
+      <h2>目前只有安卓版</h2>
+      <p class="muted" style="margin: 0">这部手机可以直接在浏览器里用：<a id="home" href="/">打开 AllinOne 网页版</a>，再「添加到主屏幕」。</p>
+    </div>
+
+    <p class="muted" id="expired" hidden>这个二维码已经过期或用过了。请在主电脑的 AllinOne 窗口里重新点「显示二维码」。</p>
+  </main>
+  <script>
+    // The QR code leads here. Android hands intent:// links to the app when it is installed; when it is not, the
+    // browser comes back to this page (with noapp=1), which then puts installing first.
+    const params = new URLSearchParams(location.search);
+    const code = params.get('code') || '';
+    const android = /Android/i.test(navigator.userAgent);
+    const appLink = `allinone://pair?hub=${encodeURIComponent(location.hostname)}&port=${location.port || 443}&code=${encodeURIComponent(code)}`;
+    const back = new URL(location.href);
+    back.searchParams.set('noapp', '1');
+    const intent = `intent://pair?hub=${encodeURIComponent(location.hostname)}&port=${location.port || 443}&code=${encodeURIComponent(code)}`
+      + `#Intent;scheme=allinone;package=personal.allinone;S.browser_fallback_url=${encodeURIComponent(back.href)};end`;
+    document.getElementById('open').href = android ? intent : appLink;
+
+    if (!code) document.getElementById('expired').hidden = false;
+    if (!android && /iPhone|iPad/i.test(navigator.userAgent)) {
+      document.getElementById('open-card').hidden = true;
+      document.getElementById('install-card').hidden = true;
+      document.getElementById('ios-card').hidden = false;
+    } else if (params.get('noapp') === '1') {
+      // Came back: the app is not installed yet. Installing comes first, opening after.
+      document.getElementById('lead').textContent = '这部手机还没装 AllinOne App，先装上它，再回来点绿色按钮。';
+      document.getElementById('install-title').textContent = '第 1 步：安装 AllinOne App';
+      document.getElementById('open-hint').hidden = true;
+      const main = document.querySelector('main');
+      main.insertBefore(document.getElementById('install-card'), document.getElementById('open-card'));
+    } else if (android && code) {
+      // Straight from the camera: try the app once by itself (some browsers want a tap; the button stays).
+      setTimeout(() => (location.href = intent), 300);
+    }
+  </script>
+</body>
+</html>

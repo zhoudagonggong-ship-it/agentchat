@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#f7f7f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#111111" media="(prefers-color-scheme: dark)">
+  <title>AllinOne</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app" data-tab="chat" data-view="side">
+    <!-- Left column: the five tab pages and the navigation -->
+    <aside id="side" class="pane">
+      <section class="page" data-page="project">
+        <header class="bar"><h1>Agent</h1></header>
+        <div id="projects" class="scroll"></div>
+      </section>
+      <section class="page" data-page="chat">
+        <header class="bar"><h1>聊天</h1><span id="conn" class="conn" title="连接状态"></span></header>
+        <a id="install" class="install" href="/app.apk" hidden>安装「AllinOne」App，后台提醒更及时 ›</a>
+        <div id="chats" class="list" role="list"></div>
+      </section>
+      <section class="page" data-page="contacts">
+        <header class="bar"><h1>通讯录</h1><button id="more-menu" class="icon-btn" aria-label="设置">···</button></header>
+        <div id="contacts" class="scroll"></div>
+      </section>
+      <section class="page" data-page="work">
+        <header class="bar"><h1>工作台</h1></header>
+        <div id="work" class="scroll"></div>
+      </section>
+      <section class="page" data-page="library">
+        <header class="bar"><h1>资料库</h1></header>
+        <div class="search"><input id="files-q" type="search" placeholder="搜索文件或对话"></div>
+        <div id="files-filter" class="chips"></div>
+        <div id="files-all" class="scroll"></div>
+      </section>
+      <nav id="nav" class="nav">
+        <button data-tab="project"><i class="ico ico-project"></i>Agent</button>
+        <button data-tab="chat"><i class="ico ico-chat"></i>聊天<span class="badge" id="badge-chat" hidden></span></button>
+        <button data-tab="contacts"><i class="ico ico-contacts"></i>通讯录<span class="badge" id="badge-contacts" hidden></span></button>
+        <button data-tab="work"><i class="ico ico-work"></i>工作台<span class="badge" id="badge-work" hidden></span></button>
+        <button data-tab="library"><i class="ico ico-files"></i>资料库</button>
+      </nav>
+    </aside>
+    <div id="div-left" class="divider" role="separator" aria-orientation="vertical" aria-label="调整左栏宽度" tabindex="0"></div>
+
+    <!-- Middle: the conversation -->
+    <main id="chat" class="pane">
+      <header class="bar chat-bar">
+        <button id="back" class="icon-btn back" aria-label="返回">‹</button>
+        <button id="show-side" class="icon-btn pane-toggle" aria-label="显示列表" hidden><i class="ico ico-sidebar"></i></button>
+        <div class="chat-title">
+          <div id="chat-friend" class="name"></div>
+          <button id="chat-thread" class="thread"><span id="chat-thread-name"></span> ▾</button>
+        </div>
+        <button id="switch" class="link">切换对话</button>
+        <button id="files-btn" class="icon-btn" aria-label="聊天文件">文件</button>
+      </header>
+      <div id="messages" class="messages"></div>
+      <div id="attach-tray" class="attach-tray" hidden></div>
+      <footer class="composer">
+        <button id="attach" class="attach-btn" aria-label="添加图片或文件">+</button>
+        <input id="attach-input" type="file" multiple hidden>
+        <textarea id="input" rows="1" placeholder="输入消息…" enterkeyhint="send"></textarea>
+        <button id="stop" class="pill stop" hidden>停止</button>
+        <button id="send" class="pill send" disabled>发送</button>
+      </footer>
+      <div id="sheet" class="sheet" hidden>
+        <div class="sheet-card">
+          <div class="grip"></div>
+          <input id="sheet-q" type="search" placeholder="搜索对话" hidden>
+          <div id="sheet-list" class="sheet-list"></div>
+        </div>
+      </div>
+      <div id="empty" class="empty"><div>选择一个对话开始</div></div>
+    </main>
+    <div id="div-right" class="divider" role="separator" aria-orientation="vertical" aria-label="调整右栏宽度" tabindex="0"></div>
+
+    <!-- Right: details and files of the conversation, a preview, a friend's profile or settings -->
+    <section id="right" class="pane">
+      <header class="bar">
+        <button id="right-back" class="icon-btn back" aria-label="返回">‹</button>
+        <h2 id="right-title">聊天文件</h2>
+        <a id="right-open" class="link" hidden>回到对话</a>
+      </header>
+      <div id="right-tabs" class="tabs"></div>
+      <div id="right-body" class="scroll"></div>
+    </section>
+  </div>
+  <div id="toast" class="toast" role="status"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
