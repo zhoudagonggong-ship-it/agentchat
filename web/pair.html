@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>添加手机 · AllinOne</title>
+  <title>添加手机 · AgentChat</title>
   <style>
     :root { color-scheme: light dark; --bg: #f2f2f7; --card: #fff; --text: #1d1d1f; --muted: #8e8e93; --line: #e5e5ea; --green: #07c160; }
     @media (prefers-color-scheme: dark) { :root { --bg: #000; --card: #1c1c1e; --text: #f5f5f7; --line: #2c2c2e; } }
@@ -25,30 +25,30 @@
 <body>
   <main>
     <h1>添加这部手机</h1>
-    <p class="lead" id="lead">打开 AllinOne App，就会自动完成配对。</p>
+    <p class="lead" id="lead">打开 AgentChat App，就会自动完成配对。</p>
 
     <div class="card" id="open-card">
-      <a class="btn" id="open" href="#">打开 AllinOne App 完成配对</a>
+      <a class="btn" id="open" href="#">打开 AgentChat App 完成配对</a>
       <p class="muted" id="open-hint" style="margin: 10px 0 0">点了没反应，说明还没装 App，看下面的步骤。</p>
     </div>
 
     <div class="card" id="install-card">
-      <h2 id="install-title">还没装 AllinOne App？</h2>
+      <h2 id="install-title">还没装 AgentChat App？</h2>
       <a class="btn plain" href="/app.apk" download>下载 App（不到 1 MB）</a>
       <ol>
-        <li>下载完成后，点通知栏里的「AllinOne.apk」，或在「我的文件 → 下载」里点它。</li>
+        <li>下载完成后，点通知栏里的「AgentChat.apk」，或在「我的文件 → 下载」里点它。</li>
         <li>如果提示<b>「出于安全考虑，不允许安装此来源的应用」</b>：点「设置」，打开<b>「允许来自此来源」</b>，再按返回键。</li>
         <li>点「安装」。如果出现「Play 保护机制」提示，点<b>「仍然安装」</b>（App 是你自己电脑上发出的，没有上架应用商店）。</li>
-        <li>装好后回到这个页面，点绿色按钮「打开 AllinOne App 完成配对」。</li>
+        <li>装好后回到这个页面，点绿色按钮「打开 AgentChat App 完成配对」。</li>
       </ol>
     </div>
 
     <div class="card" id="ios-card" hidden>
       <h2>目前只有安卓版</h2>
-      <p class="muted" style="margin: 0">这部手机可以直接在浏览器里用：<a id="home" href="/">打开 AllinOne 网页版</a>，再「添加到主屏幕」。</p>
+      <p class="muted" style="margin: 0">这部手机可以直接在浏览器里用：<a id="home" href="/">打开 AgentChat 网页版</a>，再「添加到主屏幕」。</p>
     </div>
 
-    <p class="muted" id="expired" hidden>这个二维码已经过期或用过了。请在主电脑的 AllinOne 窗口里重新点「显示二维码」。</p>
+    <p class="muted" id="expired" hidden>这个二维码已经过期或用过了。请在主电脑的 AgentChat 窗口里重新点「显示二维码」。</p>
   </main>
   <script>
     // The QR code leads here. Android hands intent:// links to the app when it is installed; when it is not, the
@@ -70,8 +70,8 @@
       document.getElementById('ios-card').hidden = false;
     } else if (params.get('noapp') === '1') {
       // Came back: the app is not installed yet. Installing comes first, opening after.
-      document.getElementById('lead').textContent = '这部手机还没装 AllinOne App，先装上它，再回来点绿色按钮。';
-      document.getElementById('install-title').textContent = '第 1 步：安装 AllinOne App';
+      document.getElementById('lead').textContent = '这部手机还没装 AgentChat App，先装上它，再回来点绿色按钮。';
+      document.getElementById('install-title').textContent = '第 1 步：安装 AgentChat App';
       document.getElementById('open-hint').hidden = true;
       const main = document.querySelector('main');
       main.insertBefore(document.getElementById('install-card'), document.getElementById('open-card'));

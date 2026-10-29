@@ -43,7 +43,7 @@ function shorten(text: string | null): string | null {
 }
 
 /**
- * Adds the AllinOne tool to Goose's extensions (config.yaml), keeping every other line as it is; the first change
+ * Adds the AgentChat tool to Goose's extensions (config.yaml), keeping every other line as it is; the first change
  * keeps a copy beside it (config.yaml.allinone-backup). Returns whether it changed the file.
  */
 export function installGooseTool(file = CONFIG_FILE, tool = toolCommand('goose')): boolean {
@@ -53,7 +53,7 @@ export function installGooseTool(file = CONFIG_FILE, tool = toolCommand('goose')
   const lines = text.split(/\r?\n/);
   const q = (s: string) => `'${s.replaceAll("'", "''")}'`;
   const block = [`  ${TOOL_NAME}:`, '    enabled: true', '    type: stdio', `    name: ${TOOL_NAME}`,
-    '    description: 通过 AllinOne 给其他电脑上的 Agent 发消息、等回复', '    display_name: AllinOne', `    cmd: ${q(tool.command)}`,
+    '    description: 通过 AgentChat 给其他电脑上的 Agent 发消息、等回复', '    display_name: AgentChat', `    cmd: ${q(tool.command)}`,
     '    args:', ...tool.args.map((a) => `    - ${q(a)}`), '    envs: {}', '    env_keys: []', '    timeout: 3600', '    bundled: null'];
   let at = lines.findIndex((l) => /^extensions:\s*$/.test(l));
   if (at < 0) {
@@ -76,7 +76,7 @@ export function installGooseTool(file = CONFIG_FILE, tool = toolCommand('goose')
   return true;
 }
 
-/** Takes the AllinOne extension back out of config.yaml (uninstall); every other line stays. */
+/** Takes the AgentChat extension back out of config.yaml (uninstall); every other line stays. */
 export function uninstallGooseTool(file = CONFIG_FILE): boolean {
   if (!existsSync(file)) return false;
   const text = readFileSync(file, 'utf8');
@@ -144,10 +144,10 @@ export class GooseAdapter implements Adapter {
     this.sink = sink;
     if (!existsSync(DB_FILE)) throw new Error('没有 Goose 对话库');
     try {
-      if (installGooseTool()) log('goose', 'AllinOne tool added to Goose (new conversations and a Goose restart pick it up)');
-      if (installHint(HINT_FILE)) log('goose', 'AllinOne note added to Goose hints');
+      if (installGooseTool()) log('goose', 'AgentChat tool added to Goose (new conversations and a Goose restart pick it up)');
+      if (installHint(HINT_FILE)) log('goose', 'AgentChat note added to Goose hints');
     } catch (error) {
-      log('goose', `could not add the AllinOne tool: ${(error as Error).message}`);
+      log('goose', `could not add the AgentChat tool: ${(error as Error).message}`);
     }
     await this.refresh(true);
     watch(DATA, (_e, name) => {

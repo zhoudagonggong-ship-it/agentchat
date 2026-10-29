@@ -38,7 +38,7 @@ function tail(file: string, bytes: number): string {
 export async function exportDiagnostics(dataDir: string, appDir: string, state: unknown, code: string, outDir?: string): Promise<string> {
   const now = new Date();
   const stamp = new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 16).replace(/[-:T]/g, ''); // local time
-  const name = `AllinOne-诊断信息-${stamp}`;
+  const name = `AgentChat-诊断信息-${stamp}`;
   const desktop = outDir ?? (await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "[Environment]::GetFolderPath('Desktop')"], { windowsHide: true })).stdout.trim();
   const stage = join(dataDir, name);
   rmSync(stage, { recursive: true, force: true });

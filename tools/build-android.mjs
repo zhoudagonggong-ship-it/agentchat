@@ -56,7 +56,7 @@ if (!existsSync(store)) {
   writeFileSync(passFile, randomBytes(24).toString('base64url'));
   const pass = readFileSync(passFile, 'utf8');
   run(java('keytool'), ['-genkeypair', '-keystore', store, '-alias', 'allinone', '-keyalg', 'RSA', '-keysize', '3072', '-validity', '36500',
-    '-dname', 'CN=AllinOne', '-storepass', pass, '-keypass', pass]);
+    '-dname', 'CN=AgentChat', '-storepass', pass, '-keypass', pass]);
   console.log('\n*** 新的签名密钥已生成：' + keys + '\n*** 请把这个文件夹备份到安全的地方；丢了它，以后就无法覆盖升级 App。\n');
 }
 // The key shares the keystore password, so --key-pass is omitted (apksigner reads one line per password option).

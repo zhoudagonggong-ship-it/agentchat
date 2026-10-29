@@ -30,7 +30,7 @@ const AWAY_MS = Number(process.env.ALLINONE_AWAY_MS ?? 30_000); // the variables
 const BACK_MS = Number(process.env.ALLINONE_BACK_MS ?? 5_000);
 /** A button on the prompt box's row, as the window shows it. */
 interface RowButton { name: string; x: number; enabled: boolean }
-/** What AllinOne learned about the desktop app's window since it changed (the send button's new names). */
+/** What AgentChat learned about the desktop app's window since it changed (the send button's new names). */
 const LEARNED_UI = join(DATA_DIR, 'learned-ui.json');
 function learnedUi(): { claudeSend?: string[] } {
   try {
@@ -62,7 +62,7 @@ public static uint Ms() { var l = new L(); l.cbSize = (uint)Marshal.SizeOf(l); G
 }
 
 /**
- * Adds the AllinOne hooks to Claude Code's user settings (once, or again when this program moved),
+ * Adds the AgentChat hooks to Claude Code's user settings (once, or again when this program moved),
  * keeping everything else in the file as it is.
  */
 export function installHooks(settingsFile = SETTINGS, hook = HOOK, node = process.execPath): boolean {
@@ -91,7 +91,7 @@ export function installHooks(settingsFile = SETTINGS, hook = HOOK, node = proces
   return changed;
 }
 
-/** Takes the AllinOne hooks back out of Claude Code's user settings (uninstall); everything else stays. */
+/** Takes the AgentChat hooks back out of Claude Code's user settings (uninstall); everything else stays. */
 export function uninstallHooks(settingsFile = SETTINGS): boolean {
   let settings: Record<string, any>;
   try {
@@ -359,7 +359,7 @@ export class ClaudeCodeAdapter implements Adapter {
     }
     saveLearnedUi({ ...learnedUi(), claudeSend: [...new Set([...(learnedUi().claudeSend ?? []), pick])] });
     log('claude', `learned the desktop app's send button: ${pick} (row: ${key})`);
-    activity(`Claude 桌面端改版了，AllinOne 学会了新的发送键「${pick}」`);
+    activity(`Claude 桌面端改版了，AgentChat 学会了新的发送键「${pick}」`);
     return true;
   }
 
@@ -456,7 +456,7 @@ export class ClaudeCodeAdapter implements Adapter {
   }
 
   /**
-   * Registers the AllinOne tool (mcp.ts) as a user-wide MCP server, through Claude Code's own `claude mcp`
+   * Registers the AgentChat tool (mcp.ts) as a user-wide MCP server, through Claude Code's own `claude mcp`
    * (its ~/.claude.json is rewritten by Claude Code all the time: never edited here). Only when missing or moved.
    */
   private async installTool(): Promise<void> {
@@ -474,9 +474,9 @@ export class ClaudeCodeAdapter implements Adapter {
     try {
       await run(['mcp', 'remove', 'allinone', '--scope', 'user']).catch(() => {});
       await run(['mcp', 'add-json', 'allinone', JSON.stringify(want), '--scope', 'user']);
-      log('claude', 'AllinOne tool added to Claude Code');
+      log('claude', 'AgentChat tool added to Claude Code');
     } catch (error) {
-      log('claude', `could not add the AllinOne tool: ${(error as Error).message}`);
+      log('claude', `could not add the AgentChat tool: ${(error as Error).message}`);
     }
   }
 

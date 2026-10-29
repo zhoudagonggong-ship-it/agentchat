@@ -244,14 +244,14 @@ export class CodexAdapter implements Adapter {
     }
   }
 
-  /** Registers the AllinOne tool with Codex's own `codex mcp add` (config.toml), once or when this program moved. */
+  /** Registers the AgentChat tool with Codex's own `codex mcp add` (config.toml), once or when this program moved. */
   private async installTool(): Promise<void> {
     const { command, args } = toolCommand(this.info.id);
     // Codex's global instructions (~/.codex/AGENTS.md): every new conversation knows the tool is there.
     try {
-      if (installHint(join(this.home, 'AGENTS.md'))) log('codex', 'AllinOne note added to Codex instructions');
+      if (installHint(join(this.home, 'AGENTS.md'))) log('codex', 'AgentChat note added to Codex instructions');
     } catch (error) {
-      log('codex', `could not add the AllinOne note: ${(error as Error).message}`);
+      log('codex', `could not add the AgentChat note: ${(error as Error).message}`);
     }
     try {
       const config = readFileSync(join(this.home, 'config.toml'), 'utf8');
@@ -270,14 +270,14 @@ export class CodexAdapter implements Adapter {
       const head = `[mcp_servers.${TOOL_NAME}]`;
       const eol = config.includes('\r\n') ? '\r\n' : '\n';
       if (config.includes(head)) writeFileSync(file, config.replace(head, `${head}${eol}${TOOL_TIMEOUT.replaceAll('\n', eol)}`));
-      log('codex', 'AllinOne tool added to Codex');
+      log('codex', 'AgentChat tool added to Codex');
     } catch (error) {
-      log('codex', `could not add the AllinOne tool: ${(error as Error).message.slice(0, 200)}`);
+      log('codex', `could not add the AgentChat tool: ${(error as Error).message.slice(0, 200)}`);
     }
   }
 
   /**
-   * Which conversation is calling the AllinOne tool right now. Codex does not tell its tools, but each conversation's
+   * Which conversation is calling the AgentChat tool right now. Codex does not tell its tools, but each conversation's
    * record (~/.codex/sessions/<year>/<month>/<day>/rollout-…-<id>.jsonl) gets the call the moment it is made: the
    * newest record that changed in the last seconds and names the tool is the caller. null when none is sure.
    */

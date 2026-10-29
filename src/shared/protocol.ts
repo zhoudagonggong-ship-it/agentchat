@@ -7,7 +7,7 @@ export const PROTOCOL_VERSION = 1;
 export const HUB_PORT = 18801;
 // The ALLINONE_*_PORT variables only in tests: a second copy runs beside the real one.
 export const HUB_LOCAL_PORT = Number(process.env.ALLINONE_HUB_PORT) || 18811;
-/** Every computer's local control window (and the Claude Code hook) talks to its AllinOne on 127.0.0.1:CONTROL_PORT. */
+/** Every computer's local control window (and the Claude Code hook) talks to its AgentChat on 127.0.0.1:CONTROL_PORT. */
 export const CONTROL_PORT = Number(process.env.ALLINONE_CONTROL_PORT) || 18812;
 
 /** `handoff`: the hub's card, in the conversation an agent worked in, for work it handed another agent. */
@@ -42,7 +42,7 @@ export interface ProjectInfo { id: string; name: string }
 /** `avatar`: sha256 of the owner's own picture for it (served at /files/<sha>); `muted`: 消息免打扰 for all its conversations. */
 export interface FriendView { deviceId: string; agentId: string; added: boolean; remark: string | null; acceptAgents: boolean; avatar: string | null; muted: boolean }
 
-/** The owner's settings the hub keeps. `agentLinks`: agents may reach each other through AllinOne. */
+/** The owner's settings the hub keeps. `agentLinks`: agents may reach each other through AgentChat. */
 /** `autoReport`: when work one agent handed another ends, its report goes back into the sender's conversation. */
 /** `followMe`: while the owner uses one of the computers, reminders show there and the phone stays quiet. */
 export interface HubSettings { agentLinks: boolean; autoReport: boolean; followMe: boolean; /** a newer release the owner can install */ newVersion?: string }
@@ -68,7 +68,7 @@ export interface Command {
   decision?: ApprovalDecision;
   /** Answers to a question card (kind "question"), by question key. */
   answers?: Record<string, string>;
-  /** Sent by an agent through AllinOne rather than by the owner's phone. */
+  /** Sent by an agent through AgentChat rather than by the owner's phone. */
   origin?: Origin;
 }
 
@@ -78,7 +78,7 @@ export interface Command {
  */
 export interface Origin { deviceId: string; agentId: string; label: string; depth?: number; /** the sender's conversation, when known */ sessionId?: string }
 
-/** What an agent may ask its computer's AllinOne (and the hub) through the AllinOne tool. */
+/** What an agent may ask its computer's AgentChat (and the hub) through the AgentChat tool. */
 export type AskOp = 'agents' | 'send' | 'wait' | 'read' | 'stop';
 
 /** A file the phone sent. `path` is filled in on the device once it is saved there. */
@@ -111,7 +111,7 @@ export type DeviceToHub =
   | { t: 'file'; sha256: string; name: string; size: number; mime: string; data: string }
   /** Is the owner at this computer: time since the last key press or mouse move, and whether it is locked. */
   | { t: 'presence'; idleMs: number; locked: boolean }
-  /** An agent here uses the AllinOne tool; the hub answers with `answer` under the same id. */
+  /** An agent here uses the AgentChat tool; the hub answers with `answer` under the same id. */
   /** `thread`: the asking agent's own conversation, when its tool knows it (Claude Code tells each of its conversations' tools). */
   | { t: 'ask'; id: number; op: AskOp; agentId: string; args: Record<string, unknown>; thread?: string }
   /** `sent`: the conversation was started with the `first` message (its receipts follow as usual). */

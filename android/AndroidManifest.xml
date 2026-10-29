@@ -14,7 +14,7 @@
   <queries><package android:name="com.tailscale.ipn" /></queries>
 
   <application
-      android:label="AllinOne"
+      android:label="AgentChat"
       android:icon="@drawable/ic_launcher"
       android:theme="@style/AppTheme"
       android:allowBackup="false"

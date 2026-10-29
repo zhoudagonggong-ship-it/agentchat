@@ -137,23 +137,23 @@ export class OpenCodeAdapter implements Adapter {
   }
 
   /**
-   * Adds the AllinOne tool to OpenCode's global config (~/.config/opencode/opencode.json, merged, never replacing
+   * Adds the AgentChat tool to OpenCode's global config (~/.config/opencode/opencode.json, merged, never replacing
    * what is there; a file that is not plain JSON is left alone), which every conversation has once OpenCode restarts;
    * and, through its API, to the folder it runs in now.
    */
   private async installTool(): Promise<void> {
     // OpenCode's global rules (~/.config/opencode/AGENTS.md): every new conversation knows the tool is there.
     try {
-      if (installHint(HINT_FILE)) log('opencode', 'AllinOne note added to OpenCode rules');
+      if (installHint(HINT_FILE)) log('opencode', 'AgentChat note added to OpenCode rules');
     } catch (error) {
-      log('opencode', `could not add the AllinOne note: ${(error as Error).message}`);
+      log('opencode', `could not add the AgentChat note: ${(error as Error).message}`);
     }
     try {
-      if (installOpenCodeTool()) log('opencode', 'AllinOne tool added to OpenCode settings (all conversations have it after OpenCode restarts)');
+      if (installOpenCodeTool()) log('opencode', 'AgentChat tool added to OpenCode settings (all conversations have it after OpenCode restarts)');
     } catch (error) {
-      log('opencode', `could not add the AllinOne tool to settings: ${(error as Error).message.slice(0, 200)}`);
+      log('opencode', `could not add the AgentChat tool to settings: ${(error as Error).message.slice(0, 200)}`);
     }
-    await this.addToolAt(null).catch((e: Error) => log('opencode', `could not add the AllinOne tool: ${e.message.slice(0, 200)}`));
+    await this.addToolAt(null).catch((e: Error) => log('opencode', `could not add the AgentChat tool: ${e.message.slice(0, 200)}`));
   }
 
   /** The tool for conversations in one folder (null: where OpenCode runs), unless that folder has it already. */

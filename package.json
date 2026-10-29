@@ -16,6 +16,6 @@
     "ws": "8.22.0"
   },
   "allinone": {
-    "releases": "zhoudagonggong-ship-it/allinone"
+    "releases": "zhoudagonggong-ship-it/agentchat"
   }
 }

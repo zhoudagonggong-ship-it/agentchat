@@ -215,7 +215,7 @@ export class Store {
    * How deep in a chain of hand-offs this agent works now: the deepest recent message another agent sent it
    * (0 when nobody did). A sends B (1), B sends C (2)…
    */
-  /** Whether another agent has ever sent this conversation anything through AllinOne. */
+  /** Whether another agent has ever sent this conversation anything through AgentChat. */
   hasAgentMessages(sessionId: string): boolean {
     return Boolean(this.db.prepare(`SELECT 1 FROM requests WHERE session_id = ? AND op = 'send' AND json_extract(payload, '$.origin.deviceId') IS NOT NULL LIMIT 1`).get(sessionId));
   }

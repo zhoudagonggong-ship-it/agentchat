@@ -29,10 +29,10 @@ export async function latestRelease(): Promise<Release | null> {
   const { version, repo } = packageInfo();
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return null;
   const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
-    headers: { accept: 'application/vnd.github+json', 'user-agent': 'AllinOne' }, signal: AbortSignal.timeout(30_000) });
+    headers: { accept: 'application/vnd.github+json', 'user-agent': 'AgentChat' }, signal: AbortSignal.timeout(30_000) });
   if (!res.ok) return null;
   const r = (await res.json()) as { tag_name?: string; body?: string; assets?: { name: string; browser_download_url: string }[] };
-  const zip = r.assets?.find((a) => /^AllinOne-.*\.zip$/.test(a.name));
+  const zip = r.assets?.find((a) => /^(AgentChat|AllinOne)-.*\.zip$/.test(a.name)); // AllinOne: the old name
   if (!r.tag_name || !zip || !newer(r.tag_name, version)) return null;
   // The release may publish the zip's SHA-256 beside it ("<zip>.sha256"): then the download is checked against it.
   const sum = r.assets?.find((a) => a.name === `${zip.name}.sha256`);

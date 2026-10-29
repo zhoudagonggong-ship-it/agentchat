@@ -28,9 +28,9 @@ function connect() {
 const ROLE = { hub: '主电脑 · 负责连接手机和其他电脑', device: '设备', paused: '已暂停', none: '正在查找主电脑…' };
 const LINK = { joined: '已连接主电脑', pending: '等待主电脑允许加入', connecting: '正在连接主电脑…', rejected: '被主电脑拒绝' };
 
-// What the owner still has to do before AllinOne runs, one step at a time; each finishes by itself once done.
+// What the owner still has to do before AgentChat runs, one step at a time; each finishes by itself once done.
 const SETUP = {
-  install: ['第 1 步：安装 Tailscale', 'AllinOne 通过 Tailscale 把你的电脑和手机安全地连在一起，先装上它（免费）。', '装好并登录后，这里会自动继续。', '下载 Tailscale'],
+  install: ['第 1 步：安装 Tailscale', 'AgentChat 通过 Tailscale 把你的电脑和手机安全地连在一起，先装上它（免费）。', '装好并登录后，这里会自动继续。', '下载 Tailscale'],
   start: ['第 1 步：打开 Tailscale', 'Tailscale 已经装好，但现在没有运行。', '打开后，这里会自动继续。', '打开 Tailscale'],
   login: ['第 2 步：登录 Tailscale', '在打开的网页里登录。你所有的电脑和手机，都要登录同一个账号。', '登录后，这里会自动继续。', '去登录'],
   https: ['最后一步：在 Tailscale 里打开 HTTPS', '只需要做一次。点按钮打开网页，在网页里点「Enable」（启用）。', '打开后一分钟内，这里会自动继续。', '打开设置网页'],
@@ -59,12 +59,12 @@ function render() {
   $('first').hidden = !first;
   if (first === 'ask') {
     $('first-title').textContent = '这台电脑平时开着吗？';
-    $('first-text').textContent = 'AllinOne 需要一台常开的电脑当「主电脑」，由它连接你的手机和其他电脑。没有找到已有的主电脑。';
+    $('first-text').textContent = 'AgentChat 需要一台常开的电脑当「主电脑」，由它连接你的手机和其他电脑。没有找到已有的主电脑。';
     $('first-sub').textContent = '以后可以在「设置 → 主电脑」里更换。';
     $('first-yes').textContent = '是，用它当主电脑';
   } else if (first === 'waiting') {
     $('first-title').textContent = '正在等主电脑';
-    $('first-text').textContent = '在你平时开着的那台电脑上安装 AllinOne，并让它当主电脑，这台会自动连上它。';
+    $('first-text').textContent = '在你平时开着的那台电脑上安装 AgentChat，并让它当主电脑，这台会自动连上它。';
     $('first-sub').textContent = '';
     $('first-yes').textContent = '还是用这台当主电脑';
   }
@@ -84,7 +84,7 @@ function render() {
       else if (p.self) action = `<button class="btn" data-hub="${esc(p.stableId)}">设为主电脑</button>`;
       else if (p.isHub) action = `<button class="btn" data-hub="${esc(p.stableId)}">加入</button>`;
       else if (s.role === 'hub' && p.member === 'online') action = `<button class="btn plain" data-hub="${esc(p.stableId)}">移交给它</button>`;
-      else action = `<span class="tag">${p.online ? '未运行 AllinOne' : '离线'}</span>`;
+      else action = `<span class="tag">${p.online ? '未运行 AgentChat' : '离线'}</span>`;
       return `<div class="row"><span class="dot ${p.online ? 'on' : ''}"></span><div class="grow">${esc(p.name)}${p.self ? '（本机）' : ''}
         ${p.isHub && !current ? '<div class="sub">正在作为主电脑运行</div>' : ''}</div>${action}</div>`;
     }).join('');

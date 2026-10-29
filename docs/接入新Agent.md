@@ -1,6 +1,6 @@
 # 怎么接入一个新的 Agent
 
-AllinOne 里每一家 Agent 都是一个**适配器**。适配器负责把这家 Agent 的对话「翻译」成 AllinOne 统一的样子，再把手机发来的指令交给它。主电脑、手机、Agent 之间的互通都不用改，接入一家新 Agent，基本上就是写一个适配器，再把它登记到几个地方。
+AgentChat 里每一家 Agent 都是一个**适配器**。适配器负责把这家 Agent 的对话「翻译」成 AgentChat 统一的样子，再把手机发来的指令交给它。主电脑、手机、Agent 之间的互通都不用改，接入一家新 Agent，基本上就是写一个适配器，再把它登记到几个地方。
 
 现有的四个适配器都可以拿来参考：
 
@@ -36,7 +36,7 @@ AllinOne 里每一家 Agent 都是一个**适配器**。适配器负责把这家
 | 成员 | 做什么 |
 |---|---|
 | `info` | `{ id, kind, label }`，例如 `{ id: 'goose', kind: 'goose', label: 'Goose' }`。`id` 在同一台电脑上不能重复，也不要再改。 |
-| `start(sink)` | 连上 Agent，报告全部对话（`sink.sessions(list, true)`）和项目（`sink.projects`），然后开始盯着变化。没装或者连不上就抛出错误，AllinOne 会当它不存在。 |
+| `start(sink)` | 连上 Agent，报告全部对话（`sink.sessions(list, true)`）和项目（`sink.projects`），然后开始盯着变化。没装或者连不上就抛出错误，AgentChat 会当它不存在。 |
 | `hydrate(threadId)` | 手机打开了这个对话：报告它最近的内容，之后有新内容也要实时报告。 |
 | `command(threadId, command)` | 执行手机发来的指令（见第 4 步），无论成功失败都要回一个回执。 |
 | `create?(cwd, title, first)` | 可选：新建一个叫 `title` 的对话。见第 5 步。 |
@@ -62,7 +62,7 @@ AllinOne 里每一家 Agent 都是一个**适配器**。适配器负责把这家
 | `tool_call` | `{ tool: 'shell' \| 'edit' \| 'web' \| 其他名字, summary, status: 'inProgress' \| 'completed' \| 'failed', output, error }`。`output` 只保留结尾几千个字。 |
 | `status` | 每一轮的结束：`{ status: 'completed' \| 'failed' \| 'interrupted', startedAt, completedAt, error }`。`itemId` 用 `turn:<轮次编号>`。 |
 | `approval_request` | 审批或提问，见第 4 步。 |
-| `artifact` | 产出的文件。不用自己拼：调用 `sink.artifact` / `sink.artifactData`，AllinOne 会生成。 |
+| `artifact` | 产出的文件。不用自己拼：调用 `sink.artifact` / `sink.artifactData`，AgentChat 会生成。 |
 
 同一轮的所有内容用同一个 `turnId`。Agent 自己没有轮次编号的话，就把「一条用户消息到下一条用户消息之间」算作一轮，用那条用户消息的编号当 `turnId`，参考 `opencode/normalize.ts`。
 
@@ -103,10 +103,10 @@ Agent 来要审批时，报告一个 `approval_request`：
 
 `create(cwd, title, first)` 要新建一个名字叫 `title` 的对话，并且主人在 Agent 自己的界面里也看得到：
 
-- 能先建空对话再发消息的（Codex、OpenCode），建好后返回 `{ threadId }`，第一条消息由 AllinOne 接着照常发送。
+- 能先建空对话再发消息的（Codex、OpenCode），建好后返回 `{ threadId }`，第一条消息由 AgentChat 接着照常发送。
 - 对话有了第一条消息才算存在的（Claude Code、Goose），就带着 `first` 一起建，返回 `{ threadId, sent: true }`，`first` 的回执照常报告。
 
-## 6. 登记到 AllinOne
+## 6. 登记到 AgentChat
 
 适配器写好以后，还要在这几处登记：
 
@@ -114,7 +114,7 @@ Agent 来要审批时，报告一个 `approval_request`：
 |---|---|
 | `src/shared/protocol.ts` | `AgentInfo.kind` 加上新的种类 |
 | `src/worker.ts` 的 `detectAgents()` | 检测这家 Agent 装了没有，装了就 `new` 一个适配器。检测要很轻：每 2 分钟就会跑一次，只查几个文件在不在，不要每次都启动程序。 |
-| 适配器的 `start()` | 把 AllinOne 工具（`src/device/tool.ts` 的 `toolCommand`）用这家 Agent 自己的方式注册成 MCP，再用 `installHint()` 把说明写进它的全局说明文件，这样它的新对话就知道能用 AllinOne。都要合并、不覆盖，已经有了就不再动。 |
+| 适配器的 `start()` | 把 AgentChat 工具（`src/device/tool.ts` 的 `toolCommand`）用这家 Agent 自己的方式注册成 MCP，再用 `installHint()` 把说明写进它的全局说明文件，这样它的新对话就知道能用 AgentChat。都要合并、不覆盖，已经有了就不再动。 |
 | `src/uninstall.ts` | 把上面加的东西都撤回去 |
 | `web-control/index.html` 的「这台电脑上还没有 Agent」卡片、`README.md` 的表格 | 加上官方下载链接 |
 
@@ -126,7 +126,7 @@ Agent 来要审批时，报告一个 `approval_request`：
   1. 手机上能看到对话列表和内容；
   2. 从手机发一条消息，Agent 的窗口里马上出现，回复也回到手机；
   3. 在 Agent 里触发一次审批，手机上能批；
-  4. 用 AllinOne 工具让另一个 Agent 给它发一条消息，并拿回回复。
+  4. 用 AgentChat 工具让另一个 Agent 给它发一条消息，并拿回回复。
 
 ## 提交前对照一遍
 

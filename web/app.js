@@ -114,7 +114,7 @@ const isFriend = (s) => state.friends.get(friendKey(s))?.added === true;
 const RECENT_S = 30 * 86_400;
 const isRecent = (s) => s.pinned || s.running || s.id === state.current || Date.now() / 1000 - s.updatedAt < RECENT_S || isUnread(s);
 /** A conversation agents keep only for passing work to each other: never listed (its approvals still reach the owner). */
-const isChannel = (s) => s.title.startsWith('AllinOne 协作');
+const isChannel = (s) => /^(AgentChat|AllinOne) 协作/.test(s.title); // AllinOne: the old name
 const visibleSessions = () => [...state.sessions.values()].filter((s) => isFriend(s) && isRecent(s) && !isChannel(s));
 
 /**
@@ -710,7 +710,7 @@ function renderMessages(jump) {
       if (item.data.role === 'user') {
         const text = ownText(item.data.text);
         const from = agentOrigin(text);
-        // Sent by another agent through AllinOne: shown as that agent's, not as the owner's.
+        // Sent by another agent through AgentChat: shown as that agent's, not as the owner's.
         if (from) {
           const who = `${esc(from.who)} 派来${from.conv ? ` ·「${esc(from.conv)}」` : ''}`;
           html += `<div class="row from-agent"><div class="who">${from.from ? `<button class="link" data-open="${esc(from.from)}">${who} ›</button>` : who}</div><div class="bubble">${esc(from.body)}</div></div>`;
@@ -744,10 +744,11 @@ function renderMessages(jump) {
   if (jump || nearBottom) box.scrollTop = box.scrollHeight;
 }
 
-/** "[来自 X「对话」，经 AllinOne 转发] …": a message one agent sent another (the hub adds the mark). */
+/** "[来自 X「对话」，经 AgentChat 转发] …": a message one agent sent another (the hub adds the mark). */
 function agentOrigin(text) {
-  // 「[来自 X「对话」，经 AllinOne 转发]」 hands work over; 「[来自 X「对话」的汇报，…]」 brings its outcome back.
-  const m = /^\[来自 (.+?)(?:「(.+?)」)?(的汇报)?，经 AllinOne 转发\] ?([\s\S]*)$/.exec(text || '');
+  // 「[来自 X「对话」，经 AgentChat 转发]」 hands work over; 「[来自 X「对话」的汇报，…]」 brings its outcome back.
+  // AllinOne: what AgentChat was called before; older messages carry that name.
+  const m = /^\[来自 (.+?)(?:「(.+?)」)?(的汇报)?，经 (?:AgentChat|AllinOne) 转发\] ?([\s\S]*)$/.exec(text || '');
   if (!m) return null;
   // The sender's conversation, to jump back to: same title, same computer · agent.
   const from = m[2] ? [...state.sessions.values()].find((s) => s.title.startsWith(m[2]) && `${deviceName(s.deviceId)} · ${agentLabel(s.deviceId, s.agentId)}` === m[1]) : null;
@@ -1310,7 +1311,7 @@ function renderProfile(key) {
     <div class="field"><span class="k">对话</span><span>${f.sessions.length} 个${f.running ? ' · 有任务正在运行' : ''}</span></div>
     <label class="setting"><span class="t">消息免打扰<div class="fmeta">它的对话做完时不再提醒，未读只显示灰点；审批仍会提醒，因为它在等你回答</div></span>
       <input type="checkbox" class="switch" data-mute-friend="${esc(key)}" ${f.muted ? 'checked' : ''}></label>
-    <label class="setting"><span class="t">接收其他 Agent 的消息<div class="fmeta">关掉后，其他 Agent 不能经 AllinOne 给它派活</div></span>
+    <label class="setting"><span class="t">接收其他 Agent 的消息<div class="fmeta">关掉后，其他 Agent 不能经 AgentChat 给它派活</div></span>
       <input type="checkbox" class="switch" data-accept="${esc(key)}" ${state.friends.get(key)?.acceptAgents !== false ? 'checked' : ''}></label>
     <div class="buttons">${f.added ? `<button class="btn" data-message="${esc(key)}">发消息</button><button class="btn danger" data-remove="${esc(key)}">删除好友</button>`
       : `<button class="btn" data-add="${esc(key)}">添加到通讯录</button>`}</div></div>`;
@@ -1352,7 +1353,7 @@ function renderSettings() {
       <button class="btn" id="install-update">更新</button></div>`;
   }
   html += `<div class="section">Agent 互通</div>
-    <label class="setting"><span class="t">允许 Agent 之间互相派活<div class="fmeta">关掉后，所有 Agent 经 AllinOne 发给其他 Agent 的消息都会被拦下</div></span>
+    <label class="setting"><span class="t">允许 Agent 之间互相派活<div class="fmeta">关掉后，所有 Agent 经 AgentChat 发给其他 Agent 的消息都会被拦下</div></span>
       <input type="checkbox" class="switch" data-hub-set="agentLinks" ${state.hubSettings?.agentLinks !== false ? 'checked' : ''}></label>
     <label class="setting"><span class="t">做完自动汇报<div class="fmeta">派出去的活做完后，对方的汇报自动发回派活的那个对话，它会接着往下做</div></span>
       <input type="checkbox" class="switch" data-hub-set="autoReport" ${state.hubSettings?.autoReport !== false ? 'checked' : ''}></label>`;

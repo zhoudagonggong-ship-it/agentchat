@@ -1,5 +1,5 @@
 # Builds a self-contained zip for installing on another Windows computer (Node runtime included).
-#   powershell -File tools\package.ps1      ->  dist\AllinOne-<version>.zip
+#   powershell -File tools\package.ps1      ->  dist\AgentChat-<version>.zip
 # On the target: unzip, double-click Setup.cmd (installs to %LOCALAPPDATA%\Programs\AllinOne, desktop icon, autostart).
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -16,13 +16,13 @@ Copy-Item (Join-Path $root 'runtime\node') (Join-Path $stage 'runtime\node') -Re
 $apk = Join-Path $root 'build\android\AllinOne.apk'
 if (Test-Path $apk) { Copy-Item $apk (Join-Path $stage 'build\android\AllinOne.apk') } # served by the hub at /app.apk
 
-$zip = Join-Path $dist "AllinOne-$version.zip"
+$zip = Join-Path $dist "AgentChat-$version.zip"
 if (Test-Path $zip) { Remove-Item $zip }
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
 Remove-Item $stage -Recurse -Force
 # Upload both to the GitHub release: the hub checks the download against the .sha256 before installing it.
 $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-[IO.File]::WriteAllText("$zip.sha256", "$sha  AllinOne-$version.zip`n")
+[IO.File]::WriteAllText("$zip.sha256", "$sha  AgentChat-$version.zip`n")
 $size = [Math]::Round((Get-Item $zip).Length / 1MB, 1)
 "$zip ($size MB)"
 "$zip.sha256"

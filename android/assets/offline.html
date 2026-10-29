@@ -26,8 +26,8 @@
     <div class="tip" id="battery" hidden>
       <p id="battery-text">Tailscale 常被手机的省电功能关掉。打开它的应用信息，点「电池」，选<b>「不受限制」</b>，以后就不会断了。</p>
       <button class="plain" onclick="AllinOneNative.batterySettings('tailscale')">去设置 Tailscale 的电池</button>
-      <p id="self-text" style="margin: 14px 0 12px" hidden>AllinOne 自己也要在后台运行，才能及时提醒你。</p>
-      <button class="plain" id="self" onclick="AllinOneNative.batterySettings('self')" hidden>允许 AllinOne 在后台运行</button>
+      <p id="self-text" style="margin: 14px 0 12px" hidden>AgentChat 自己也要在后台运行，才能及时提醒你。</p>
+      <button class="plain" id="self" onclick="AllinOneNative.batterySettings('self')" hidden>允许 AgentChat 在后台运行</button>
     </div>
     <p style="margin: 18px 0 0"><a href="scan.html" style="color:#07c160;text-decoration:none">换了主电脑？重新扫码配对</a></p>
   </div>
@@ -36,9 +36,9 @@
     const native = window.AllinOneNative;
     let state = 'on';
     const COPY = {
-      missing: ['手机上还没有 Tailscale', 'AllinOne 通过 Tailscale 连接你的电脑。先安装它，并登录和电脑同一个账号。', '安装 Tailscale'],
+      missing: ['手机上还没有 Tailscale', 'AgentChat 通过 Tailscale 连接你的电脑。先安装它，并登录和电脑同一个账号。', '安装 Tailscale'],
       off: ['Tailscale 没有打开', '打开 Tailscale，点开关连上，再回到这里。', '打开 Tailscale'],
-      on: ['暂时连不上主电脑', 'Tailscale 已经连上了。主电脑可能关机、睡眠，或 AllinOne 没在运行。', '重试'],
+      on: ['暂时连不上主电脑', 'Tailscale 已经连上了。主电脑可能关机、睡眠，或 AgentChat 没在运行。', '重试'],
     };
     function render() {
       state = native && native.tailscaleState ? native.tailscaleState() : 'on';

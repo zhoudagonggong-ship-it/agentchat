@@ -1,4 +1,4 @@
-﻿# AllinOne 托盘：显示状态图标，并照看主程序。
+﻿# AgentChat 托盘：显示状态图标，并照看主程序。
 # 主程序的退出码：75 = 请求重启（切换角色、更新程序）；76 = 更新后托盘自己的文件也变了，托盘重新启动自己。
 # 只用 Windows 自带的 .NET WinForms，不需要安装任何东西。由 AllinOne.vbs 隐藏启动。
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -32,10 +32,10 @@ $Icons = @{ green = New-DotIcon 7 193 96; gray = New-DotIcon 142 142 147; orange
 
 $Tray = New-Object System.Windows.Forms.NotifyIcon
 $Tray.Icon = $Icons.gray
-$Tray.Text = 'AllinOne · 启动中'
+$Tray.Text = 'AgentChat · 启动中'
 $Tray.Visible = $true
 $Menu = New-Object System.Windows.Forms.ContextMenuStrip
-$OpenItem = $Menu.Items.Add('打开 AllinOne')
+$OpenItem = $Menu.Items.Add('打开 AgentChat')
 $PauseItem = $Menu.Items.Add('暂停')
 $RescanItem = $Menu.Items.Add('重新检测 Agent')
 $DiagItem = $Menu.Items.Add('导出诊断信息')
@@ -82,7 +82,7 @@ function Update-Tray($state) {
   $script:Paused = $tip.Contains('已暂停')
   $PauseItem.Text = if ($script:Paused) { '继续' } else { '暂停' }
   if ($tip -ne $script:LastTip -and $tip.Contains('请求加入')) {
-    $Tray.ShowBalloonTip(5000, 'AllinOne', '有电脑请求加入，点开 AllinOne 允许', [System.Windows.Forms.ToolTipIcon]::Info)
+    $Tray.ShowBalloonTip(5000, 'AgentChat', '有电脑请求加入，点开 AgentChat 允许', [System.Windows.Forms.ToolTipIcon]::Info)
   }
   # 第一次运行还没选主电脑：自动打开窗口。
   if (-not $script:OpenedOnce -and ($tip.Contains('请选择主电脑') -or $tip.Contains('需要设置'))) { $script:OpenedOnce = $true; Open-Window }

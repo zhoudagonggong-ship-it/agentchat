@@ -24,5 +24,5 @@ test('the zip holds the summary, the log and the settings', async () => {
   writeFileSync(join(data, 'config.json'), JSON.stringify({ deviceSecret: 'abc123', paused: false }));
   const zip = await exportDiagnostics(data, join(import.meta.dirname, '..'), { role: 'hub' }, 'v1', data);
   assert.ok(readdirSync(data).includes(zip.split(/[\\/]/).pop()!));
-  assert.ok(!readdirSync(data).some((f) => f.startsWith('AllinOne-诊断信息-') && !f.endsWith('.zip')), 'staging folder left behind');
+  assert.ok(!readdirSync(data).some((f) => f.startsWith('AgentChat-诊断信息-') && !f.endsWith('.zip')), 'staging folder left behind');
 });

@@ -1,4 +1,4 @@
-﻿# 安装 AllinOne：装到本用户的程序目录，建桌面和开始菜单图标，登记到「设置 → 应用」，开机自启，然后启动。
+﻿# 安装 AgentChat（以前叫 AllinOne，程序目录和注册表项沿用旧名）：装到本用户的程序目录，建桌面和开始菜单图标，登记到「设置 → 应用」，开机自启，然后启动。
 # 只用 Windows 自带的功能，不需要管理员权限。再次运行就是升级：程序换新，data（对话、设置）保留。
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -6,7 +6,7 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $test = $env:ALLINONE_INSTALL_TEST
 function Say([string]$text, [string]$icon = 'Information') {
   if ($test) { Write-Output $text; return }
-  [void][System.Windows.Forms.MessageBox]::Show($text, 'AllinOne', 'OK', $icon)
+  [void][System.Windows.Forms.MessageBox]::Show($text, 'AgentChat', 'OK', $icon)
 }
 
 try {
@@ -39,7 +39,7 @@ try {
   [System.Drawing.Icon]::FromHandle($bmp.GetHicon()).Save($stream)
   $stream.Close()
 
-  # 桌面和开始菜单的图标；开始菜单里还有「卸载 AllinOne」。
+  # 桌面和开始菜单的图标；开始菜单里还有「卸载 AgentChat」。旧名字的图标换掉。
   $shell = New-Object -ComObject WScript.Shell
   function New-Link([string]$path, [string]$target, [string]$arguments, [string]$description) {
     $link = $shell.CreateShortcut($path)
@@ -51,28 +51,30 @@ try {
     $link.Save()
   }
   $desktop = if ($test) { New-Item -ItemType Directory -Force (Join-Path $test 'Desktop') } else { [Environment]::GetFolderPath('Desktop') }
-  $menu = Join-Path ($(if ($test) { Join-Path $test 'Start' } else { [Environment]::GetFolderPath('Programs') })) 'AllinOne'
+  $menu = Join-Path ($(if ($test) { Join-Path $test 'Start' } else { [Environment]::GetFolderPath('Programs') })) 'AgentChat'
   New-Item -ItemType Directory -Force $menu | Out-Null
   $open = "`"$dest\AllinOne.vbs`""
   $uninstall = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$dest\src\setup\uninstall.ps1`""
-  New-Link (Join-Path $desktop 'AllinOne.lnk') 'wscript.exe' $open '打开 AllinOne'
-  New-Link (Join-Path $menu 'AllinOne.lnk') 'wscript.exe' $open '打开 AllinOne'
-  New-Link (Join-Path $menu '卸载 AllinOne.lnk') 'powershell.exe' $uninstall '卸载 AllinOne'
+  Remove-Item (Join-Path $desktop 'AllinOne.lnk') -ErrorAction SilentlyContinue
+  Remove-Item (Join-Path (Split-Path $menu) 'AllinOne') -Recurse -ErrorAction SilentlyContinue
+  New-Link (Join-Path $desktop 'AgentChat.lnk') 'wscript.exe' $open '打开 AgentChat'
+  New-Link (Join-Path $menu 'AgentChat.lnk') 'wscript.exe' $open '打开 AgentChat'
+  New-Link (Join-Path $menu '卸载 AgentChat.lnk') 'powershell.exe' $uninstall '卸载 AgentChat'
 
   if ($test) { Say "installed to $dest"; exit }
 
   # 登记到「设置 → 应用」，在那里也能卸载。
   $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AllinOne'
   New-Item -Path $key -Force | Out-Null
-  $values = @{ DisplayName = 'AllinOne'; DisplayVersion = $version; Publisher = 'AllinOne'; InstallLocation = $dest; DisplayIcon = $iconFile
+  $values = @{ DisplayName = 'AgentChat'; DisplayVersion = $version; Publisher = 'AgentChat'; InstallLocation = $dest; DisplayIcon = $iconFile
     UninstallString = "powershell.exe $uninstall"; NoModify = 1; NoRepair = 1 }
   foreach ($name in $values.Keys) { New-ItemProperty -Path $key -Name $name -Value $values[$name] -Force | Out-Null }
 
-  # 开机自启（之后可以在 AllinOne 窗口的设置里关掉）。
+  # 开机自启（之后可以在 AgentChat 窗口的设置里关掉）。
   New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'AllinOne' -Value "wscript.exe $open" -Force | Out-Null
 
   Start-Process wscript.exe $open
-  Say "AllinOne 已安装好，桌面上有它的图标。`n`n马上会打开 AllinOne 的窗口，跟着窗口一步一步设置就行。"
+  Say "AgentChat 已安装好，桌面上有它的图标。`n`n马上会打开 AgentChat 的窗口，跟着窗口一步一步设置就行。"
 } catch {
   Say "安装没有完成：$($_.Exception.Message)`n`n可以再双击一次 Setup.cmd 重试。" 'Error'
 }

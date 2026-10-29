@@ -38,7 +38,7 @@ test('the note about AllinOne goes in once and comes out cleanly', () => {
   writeFileSync(own, '# 我的规则\n\n总是用中文。\n');
   assert.equal(installHint(own), true);
   assert.equal(installHint(own), false); // already there: unchanged
-  assert.match(readFileSync(own, 'utf8'), /总是用中文。[\s\S]*## AllinOne/);
+  assert.match(readFileSync(own, 'utf8'), /总是用中文。[\s\S]*## AgentChat/);
   assert.equal(uninstallHint(own), true);
   assert.equal(readFileSync(own, 'utf8'), '# 我的规则\n\n总是用中文。\n');
 

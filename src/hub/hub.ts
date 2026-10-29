@@ -28,12 +28,14 @@ const MAX_CHAIN = 3;
 const CHAIN_WINDOW_MS = 30 * 60_000;
 const MAX_SENDS_PER_HOUR = 30;
 /** Title start of the conversations agents keep only for passing work to each other (the phone hides them). */
-const CHANNEL_TITLE = 'AllinOne 协作';
+const CHANNEL_TITLE = 'AgentChat 协作';
+/** One of those, including the ones opened while AgentChat was still called AllinOne. */
+const isChannelTitle = (title: string): boolean => title.startsWith(CHANNEL_TITLE) || title.startsWith('AllinOne 协作');
 /** How long a sender may still be waiting on its own before its report goes back into its conversation. */
 const REPORT_DELAY_MS = 8000;
 /** Added to the first message another agent sends a conversation: what it is, and that the answer goes back by itself. */
-const FIRST_CONTACT_NOTE = '\n\n（AllinOne 说明：这条是主人电脑上的另一个 Agent 经 AllinOne 转给你的。照常在这个对话里做事、回复就行，'
-  + '做完后 AllinOne 会自动把你的回复带回给它，不用另外发。你也可以用 allinone 工具联系各台电脑上的其他 Agent；'
+const FIRST_CONTACT_NOTE = '\n\n（AgentChat 说明：这条是主人电脑上的另一个 Agent 经 AgentChat 转给你的。照常在这个对话里做事、回复就行，'
+  + '做完后 AgentChat 会自动把你的回复带回给它，不用另外发。你也可以用 allinone 工具联系各台电脑上的其他 Agent；'
   + '如果你还没有这个工具，主人重新打开这个对话后就会有。请用中文回答。）';
 /** Used a computer this recently (keyboard or mouse): the owner is taken to sit there. */
 const PRESENT_MS = 3 * 60_000;
@@ -45,7 +47,7 @@ const run = promisify(execFile);
 /** Why a computer could not make the conversation, as the asking agent reads it. */
 function createError(code: string | undefined): string {
   const known: Record<string, string> = {
-    goose_window_in_use: 'Goose 那台电脑正有人在用键盘鼠标（AllinOne 只在 30 秒没人操作时才去 Goose 窗口里新建），请过几分钟再试',
+    goose_window_in_use: 'Goose 那台电脑正有人在用键盘鼠标（AgentChat 只在 30 秒没人操作时才去 Goose 窗口里新建），请过几分钟再试',
     goose_no_window: 'Goose 没有打开：请主人在那台电脑上打开 Goose 后再试',
     goose_locked: 'Goose 那台电脑锁屏了，窗口里没法新建对话',
     goose_draft: 'Goose 窗口的输入框里有没发出去的文字，为了不弄丢，先不新建',
@@ -349,7 +351,7 @@ export class Hub {
       // The phone app, built by tools/build-android.mjs; opened in the phone's browser to install.
       if (!existsSync(APK)) return void res.writeHead(404).end();
       res.writeHead(200, { 'Content-Type': 'application/vnd.android.package-archive', 'Content-Length': statSync(APK).size,
-        'Content-Disposition': 'attachment; filename="AllinOne.apk"', 'Cache-Control': 'no-cache' });
+        'Content-Disposition': 'attachment; filename="AgentChat.apk"', 'Cache-Control': 'no-cache' });
       return void createReadStream(APK).pipe(res);
     }
     // /pair: where the pairing QR code leads in the phone's browser (opens the app, or helps install it first).
@@ -504,7 +506,7 @@ export class Hub {
           const title = this.store.session(id)?.title ?? '对话';
           // Agents passing work to each other finish turns all the time: the owner hears of their own conversations only.
           const done = item.kind === 'status' && item.data.status === 'completed' && typeof item.data.completedAt === 'number'
-            && Date.now() / 1000 - item.data.completedAt < 120 && !title.startsWith(CHANNEL_TITLE);
+            && Date.now() / 1000 - item.data.completedAt < 120 && !isChannelTitle(title);
           if (done) {
             activity(`${this.store.device(deviceId)?.name} · ${title}：完成了一轮`);
             // 消息免打扰 (the conversation or its agent): no notice. Approvals still come: the agent waits for an answer.
@@ -761,7 +763,7 @@ export class Hub {
     return { view: this.store.request(view.requestId)!, created };
   }
 
-  // ---------- agents using the AllinOne tool ----------
+  // ---------- agents using the AgentChat tool ----------
 
   private async onAsk(conn: DeviceConn, deviceId: string, msg: Extract<DeviceToHub, { t: 'ask' }>): Promise<void> {
     try {
@@ -858,7 +860,7 @@ export class Hub {
     if (this.newVersion === version) return;
     this.newVersion = version;
     this.broadcast({ t: 'settings', settings: this.settings() });
-    this.notice({ type: 'agent', sessionId: '', title: 'AllinOne 有新版本', text: `新版本 ${version} 已发布，打开 App 的「设置」就能更新` });
+    this.notice({ type: 'agent', sessionId: '', title: 'AgentChat 有新版本', text: `新版本 ${version} 已发布，打开 App 的「设置」就能更新` });
   }
 
   /**
@@ -903,14 +905,14 @@ export class Hub {
     origin = { ...origin, depth, ...(from ? { sessionId: from.id } : {}) };
     const requestId = randomUUID().replaceAll('-', '');
     // The receiving agent sees at a glance that this comes from another agent, not from the owner (and from which conversation).
-    const mark = from && !from.title.startsWith(CHANNEL_TITLE) ? `${origin.label}「${from.title.slice(0, 40)}」` : origin.label;
+    const mark = from && !isChannelTitle(from.title) ? `${origin.label}「${from.title.slice(0, 40)}」` : origin.label;
     // Files the sender handed along: its computer sent them ahead, the hub holds them by their hash.
     const files = Array.isArray(args.files) ? (args.files as Attachment[]).filter((f) => f && typeof f.sha256 === 'string') : [];
     for (const f of files) if (!this.store.artifact(f.sha256)) throw new Error(`文件「${f.name}」没有传到主电脑，请重发`);
-    const command: Command = { requestId, op: 'send', text: `[来自 ${mark}，经 AllinOne 转发] ${text}`, origin, ...(files.length ? { files } : {}) };
+    const command: Command = { requestId, op: 'send', text: `[来自 ${mark}，经 AgentChat 转发] ${text}`, origin, ...(files.length ? { files } : {}) };
     const created = args.newConversation || args.title ? await this.createFor(origin, args, command) : null;
     const sessionId = created?.sessionId ?? this.findTarget(args);
-    // A conversation that never had a message from another agent (one opened before AllinOne was there, say) learns
+    // A conversation that never had a message from another agent (one opened before AgentChat was there, say) learns
     // in a few lines what this is and that its answer goes back by itself.
     if (!created && !this.store.hasAgentMessages(sessionId)) command.text += FIRST_CONTACT_NOTE;
     const target = this.store.session(sessionId)!;
@@ -930,12 +932,12 @@ export class Hub {
 
   /**
    * Which conversation an agent works in right now: the one it is running a turn in (the latest, if several);
-   * failing that, the one it was busy in during the last two minutes. The AllinOne tool cannot tell, so the hub looks.
+   * failing that, the one it was busy in during the last two minutes. The AgentChat tool cannot tell, so the hub looks.
    */
   private workingConversation(origin: Origin): SessionView | null {
     const own = origin.sessionId ? this.store.session(origin.sessionId) : undefined;
     if (own && !own.archived) return own;
-    const sessions = this.store.recentSessions(origin.deviceId, origin.agentId, 50).filter((s) => !s.title.startsWith(CHANNEL_TITLE));
+    const sessions = this.store.recentSessions(origin.deviceId, origin.agentId, 50).filter((s) => !isChannelTitle(s.title));
     return sessions.find((s) => s.running) ?? sessions.find((s) => Date.now() / 1000 - s.updatedAt < 120) ?? null;
   }
 
@@ -953,7 +955,7 @@ export class Hub {
     }
     const item: Item = { itemId: `handoff:${requestId}`, turnId: from?.activeTurnId ?? null, kind: 'handoff', ts: Date.now(), data: {
       task: requestId, to: remark || `${device?.name ?? ''} · ${agent?.label ?? target.agentId}`, targetSessionId: target.id,
-      channel: target.title.startsWith(CHANNEL_TITLE), text: text.split('\n')[0]!.slice(0, 120), state: 'running', reply: null, startedAt: Date.now(), endedAt: null } };
+      channel: isChannelTitle(target.title), text: text.split('\n')[0]!.slice(0, 120), state: 'running', reply: null, startedAt: Date.now(), endedAt: null } };
     this.handoffs.set(requestId, { sessionId, targetSessionId: target.id, item });
     this.putItems(sessionId, [item]);
   }
@@ -995,8 +997,8 @@ export class Hub {
     const asked = String(payload.text ?? '').replace(/^\[来自 [^\]]*\]\s*/, '').split('\n')[0]!.slice(0, 60);
     const how = outcome.state === 'done' ? '做完了' : outcome.state === 'interrupted' ? '被停止了，没有做完' : `没有做成（${outcome.error ?? '执行失败'}）`;
     let reply = (outcome.reply ?? '').trim();
-    if (reply.length > REPORT_MAX) reply = reply.slice(0, REPORT_MAX) + `\n\n……（太长，后面省略了；完整内容用 AllinOne 的 read 查看，conversationId: ${target.id}）`;
-    const text = `[来自 ${label}「${target.title.slice(0, 40)}」的汇报，经 AllinOne 转发] 你派的「${asked}」${how}。${reply ? `\n\n${reply}` : ''}`;
+    if (reply.length > REPORT_MAX) reply = reply.slice(0, REPORT_MAX) + `\n\n……（太长，后面省略了；完整内容用 AgentChat 的 read 查看，conversationId: ${target.id}）`;
+    const text = `[来自 ${label}「${target.title.slice(0, 40)}」的汇报，经 AgentChat 转发] 你派的「${asked}」${how}。${reply ? `\n\n${reply}` : ''}`;
     const origin: Origin = { deviceId: target.deviceId, agentId: target.agentId, label, sessionId: target.id,
       depth: Math.max(0, (payload.origin.depth ?? 1) - 1) };
     // The files it made in that turn go along, to the sender's computer, as the owner's attachments would.

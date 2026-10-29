@@ -36,7 +36,7 @@ public class NotifyService extends Service {
     channels();
     Notification ongoing = new Notification.Builder(this, CH_ONGOING)
         .setSmallIcon(R.drawable.ic_notify)
-        .setContentTitle("AllinOne")
+        .setContentTitle("AgentChat")
         .setContentText("在后台接收完成提醒")
         .setOngoing(true)
         .setContentIntent(open(null, 0))

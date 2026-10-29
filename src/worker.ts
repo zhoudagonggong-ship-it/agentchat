@@ -48,7 +48,7 @@ export class Worker {
   private role: Role = 'none';
   private hub: Hub | null = null;
   private device: Device | null = null;
-  /** What the owner still has to do before AllinOne can run (shown in the window); null when nothing. */
+  /** What the owner still has to do before AgentChat can run (shown in the window); null when nothing. */
   private setup: { step: TailscaleStep | 'https'; url?: string } | null = null;
   private release: Release | null = null;
   private peers: Peer[] = [];
@@ -542,7 +542,7 @@ export class Worker {
           if (body.yes) void this.chooseHub(this.tailnet.self.stableId).catch((e: Error) => activity(`设为主电脑失败：${e.message}`, 'warn'));
           else {
             this.firstStart = 'waiting';
-            activity('等待主电脑：在平时开着的那台电脑上安装 AllinOne，这台会自动连上它');
+            activity('等待主电脑：在平时开着的那台电脑上安装 AgentChat，这台会自动连上它');
             this.changed();
           }
           return reply(200, { ok: true });
@@ -580,7 +580,7 @@ export class Worker {
           return slowReply(res, claude ? claude.hook(body, gone.signal).then((output) => ({ output })) : Promise.resolve({ output: null }));
         }
         case '/api/agent': {
-          // The AllinOne tool (mcp.ts) of an agent on this computer: the hub lists agents, sends, waits.
+          // The AgentChat tool (mcp.ts) of an agent on this computer: the hub lists agents, sends, waits.
           const op = String(body.op ?? '') as AskOp;
           const agentId = String(body.agent ?? '');
           if (!['agents', 'send', 'wait', 'read', 'stop'].includes(op) || !this.device?.adapter(agentId)) return reply(400, { error: '不支持的操作或 Agent' });

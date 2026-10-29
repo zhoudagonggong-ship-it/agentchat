@@ -1,5 +1,5 @@
-// Run by src\setup\uninstall.ps1: takes back out of each agent what AllinOne added (Claude Code's hooks, and the
-// AllinOne tool in Claude Code, Codex, OpenCode and Goose), each through the same official way it went in.
+// Run by src\setup\uninstall.ps1: takes back out of each agent what AgentChat added (Claude Code's hooks, and the
+// AgentChat tool in Claude Code, Codex, OpenCode and Goose), each through the same official way it went in.
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { findClaudeExe, uninstallHooks } from './device/claude/adapter.ts';
@@ -32,7 +32,7 @@ await step('codex tool', async () => {
 });
 await step('opencode tool', () => uninstallOpenCodeTool());
 await step('goose tool', () => uninstallGooseTool());
-// The note about AllinOne in each agent's global instructions.
+// The note about AgentChat in each agent's global instructions.
 await step('codex note', () => uninstallHint(join(process.env.CODEX_HOME ?? join(homedir(), '.codex'), 'AGENTS.md')));
 await step('opencode note', () => uninstallHint(OPENCODE_HINT));
 await step('goose note', () => uninstallHint(GOOSE_HINT));

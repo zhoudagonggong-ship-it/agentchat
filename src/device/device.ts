@@ -39,7 +39,7 @@ export interface Adapter {
    * `first` and says so (`sent`), receipts and all; the others leave `first` to be sent as usual.
    */
   create?(cwd: string, title: string, first?: Command): Promise<{ threadId: string; sent?: boolean }>;
-  /** The conversation calling the AllinOne tool right now, when the agent's tools are not told (Codex). */
+  /** The conversation calling the AgentChat tool right now, when the agent's tools are not told (Codex). */
   callerThread?(): string | null;
   /** Work of ours under way here (a turn we run, an approval waiting): restarting this program now would cut it off. */
   busy?(): boolean;
@@ -241,7 +241,7 @@ export class Device {
     }
   }
 
-  /** An agent here uses the AllinOne tool: the hub answers (lists agents, sends on its behalf, waits for a reply). */
+  /** An agent here uses the AgentChat tool: the hub answers (lists agents, sends on its behalf, waits for a reply). */
   ask(op: AskOp, agentId: string, args: Record<string, unknown>, timeoutMs: number, thread?: string): Promise<unknown> {
     if (!this.active) return Promise.reject(new Error('本机还没有连上主电脑'));
     // Files the agent hands along (paths on this computer): to the hub first, then named in the message by their hash.

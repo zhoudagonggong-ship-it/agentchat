@@ -1,6 +1,6 @@
-// The AllinOne tool: an MCP server (stdio) that each agent on this computer runs, so it can reach the agents on
-// every computer through AllinOne, the same road the owner's phone takes. It only talks to this computer's
-// AllinOne (127.0.0.1); the hub does the rest. Started by the agent as `node mcp.ts --agent <agent id>`.
+// The AgentChat tool: an MCP server (stdio) that each agent on this computer runs, so it can reach the agents on
+// every computer through AgentChat, the same road the owner's phone takes. It only talks to this computer's
+// AgentChat (127.0.0.1); the hub does the rest. Started by the agent as `node mcp.ts --agent <agent id>`.
 import { CONTROL_PORT } from '../shared/protocol.ts';
 import { AGENT_HINT } from './tool.ts';
 
@@ -13,18 +13,18 @@ const thread = process.env.CLAUDE_CODE_SESSION_ID ?? '';
 const TOOLS = [
   {
     name: 'agents',
-    description: '列出 AllinOne 里各台电脑上的 Agent（比如「5090 · OpenCode」）是否在线，以及它们最近的对话。发消息前先用它找对象。',
+    description: '列出 AgentChat 里各台电脑上的 Agent（比如「5090 · OpenCode」）是否在线，以及它们最近的对话。发消息前先用它找对象。',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'send',
-    description: '通过 AllinOne 给另一台电脑上的某个 Agent 发一条消息，可以等它做完把回复带回来。'
+    description: '通过 AgentChat 给另一台电脑上的某个 Agent 发一条消息，可以等它做完把回复带回来。'
       + '优先发到主人和它正在用的已有对话里：主人也在那里看、会插话。'
       + '主人要你让对方开一个新的工作对话时，用 title 给它起名：会在对方那里新建这个名字的对话，主人在手机和对方软件里都看得到、能参与'
       + '（已有同名的就直接发进去）。只是为了传话、不需要主人参与时，才用 newConversation：它会用你和这个 Agent 之间专门传话的那一个对话'
       + '（没有就建一个，以后一直复用，主人的手机上不显示它）。'
       + '消息开头会自动标明是你发的；对方需要审批时由主人在手机上处理，你不能代为审批。'
-      + '对方要做很久时不必一直等（wait_minutes 设小一点或 0）：做完后，对方的汇报会自动发回到你现在这个对话里，以「[来自 …的汇报，经 AllinOne 转发]」开头，你收到后接着做。'
+      + '对方要做很久时不必一直等（wait_minutes 设小一点或 0）：做完后，对方的汇报会自动发回到你现在这个对话里，以「[来自 …的汇报，经 AgentChat 转发]」开头，你收到后接着做。'
       + '拿到结果后，在你自己的对话里向主人汇报。',
     inputSchema: {
       type: 'object',
@@ -84,10 +84,10 @@ async function allinone(op: string, args: Record<string, unknown>): Promise<unkn
       method: 'POST', headers: { 'content-type': 'application/json', 'x-allinone': '1' }, body: JSON.stringify({ op, agent, thread, args }),
     });
   } catch {
-    throw new Error('这台电脑上的 AllinOne 没有运行');
+    throw new Error('这台电脑上的 AgentChat 没有运行');
   }
   const out = (await res.json()) as { result?: unknown; error?: string };
-  if (!res.ok || out.error) throw new Error(out.error ?? `AllinOne ${res.status}`);
+  if (!res.ok || out.error) throw new Error(out.error ?? `AgentChat ${res.status}`);
   return out.result;
 }
 

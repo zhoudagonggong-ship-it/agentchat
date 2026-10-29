@@ -123,7 +123,7 @@ export class CodexRpc {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new RpcError('timeout: initialize')), 90_000);
       this.pending.set(id, { resolve: () => resolve(), reject, timer });
-      this.write({ id, method: 'initialize', params: { clientInfo: { name: 'allinone', title: 'AllinOne', version: '0.1.0' } } });
+      this.write({ id, method: 'initialize', params: { clientInfo: { name: 'allinone', title: 'AgentChat', version: '0.1.0' } } });
     });
     this.write({ method: 'initialized' });
     this.backoff = 1000;
