@@ -6,6 +6,8 @@ Codex、Claude Code、OpenCode、Goose……分散在家里、公司的好几台
 
 ![平台](https://img.shields.io/badge/电脑-Windows%2010%20%2F%2011-0078D4) ![手机](https://img.shields.io/badge/手机-Android%20%7C%20网页版-3DDC84) ![许可](https://img.shields.io/badge/许可-MIT-green) ![免费](https://img.shields.io/badge/费用-免费-brightgreen)
 
+![AgentChat 界面示意：左边是 Agent 列表，中间是和 Codex 的对话，右边预览它做出来的文件；折叠起来就是一部手机](docs/images/overview.jpg)
+
 ---
 
 ## 你是不是也这样？
