@@ -283,7 +283,7 @@ export class Store {
     const upsert = this.db.prepare(`INSERT INTO sessions(id, device_id, agent_id, thread_id, title, cwd, updated_at, running, active_turn_id, preview,
         project_id, project_name, replies, archived, seq)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)
-      ON CONFLICT(id) DO UPDATE SET title = excluded.title, cwd = excluded.cwd, updated_at = excluded.updated_at,
+      ON CONFLICT(id) DO UPDATE SET title = excluded.title, cwd = excluded.cwd, updated_at = MAX(sessions.updated_at, excluded.updated_at),
         running = excluded.running, active_turn_id = excluded.active_turn_id, preview = COALESCE(excluded.preview, preview),
         project_id = excluded.project_id, project_name = excluded.project_name, archived = 0, seq = excluded.seq,
         replies = sessions.replies + ?`);
@@ -296,7 +296,10 @@ export class Store {
         const preview = s.preview ?? null;
         const projectId = s.projectId ?? null;
         const projectName = s.projectName ?? null;
-        if (old && !old.archived && old.title === s.title && old.cwd === s.cwd && old.updated_at === s.updatedAt
+        // A conversation's time is its latest activity, as in a chat app: it only moves on. An agent reporting an
+        // older time than a message already brought (Codex keeps its own until it next touches the thread) changes nothing.
+        const updatedAt = Math.max(old?.updated_at ?? 0, s.updatedAt);
+        if (old && !old.archived && old.title === s.title && old.cwd === s.cwd && old.updated_at === updatedAt
           && Boolean(old.running) === s.running && old.active_turn_id === s.activeTurnId && (preview === null || old.preview === preview)
           && old.project_id === projectId && old.project_name === projectName) continue;
         const seq = this.nextSeq();
@@ -304,7 +307,7 @@ export class Store {
         // agent touching its own records, moves the time too but is no reply. A conversation seen the first time has none.
         const reply = old && !s.running && (old.running || (s.updatedAt > old.updated_at && preview !== null && preview !== old.preview)) ? 1 : 0;
         upsert.run(id, deviceId, agentId, s.threadId, s.title, s.cwd, s.updatedAt, s.running ? 1 : 0, s.activeTurnId, preview, projectId, projectName, seq, reply);
-        changed.push({ ...s, preview: preview ?? old?.preview ?? null, projectId, projectName, pinned: Boolean(old?.pinned), muted: Boolean(old?.muted), id, deviceId, seq,
+        changed.push({ ...s, updatedAt, preview: preview ?? old?.preview ?? null, projectId, projectName, pinned: Boolean(old?.pinned), muted: Boolean(old?.muted), id, deviceId, seq,
           replies: (old?.replies ?? 0) + reply, readReplies: old?.read_replies ?? 0 });
       }
       if (complete) {
@@ -403,6 +406,27 @@ export class Store {
   // ---------- items ----------
 
   /** Upserts items, skipping ones whose content did not change. Returns the changed ones. */
+  /**
+   * Moves a conversation's time on to `ms` (a message in it, or one the owner just sent), as a chat app orders its
+   * chats by their latest message; never back. The changed view, or undefined when its time was later already.
+   */
+  touch(id: string, ms: number): SessionView | undefined {
+    const at = Math.floor(ms / 1000);
+    const r = this.db.prepare('SELECT updated_at FROM sessions WHERE id = ?').get(id) as { updated_at: number } | undefined;
+    if (!r || at <= r.updated_at) return undefined;
+    this.db.prepare('UPDATE sessions SET updated_at = ?, seq = ? WHERE id = ?').run(at, this.nextSeq(), id);
+    return this.session(id);
+  }
+
+  /** Conversations whose time is older than their latest message (kept from before times followed messages): moved on. */
+  catchUpTimes(): number {
+    const rows = this.db.prepare(`SELECT s.id, s.updated_at AS at, (SELECT MAX(i.ts) FROM items i WHERE i.session_id = s.id
+      AND i.kind IN ('message', 'artifact', 'handoff')) AS latest FROM sessions s WHERE s.archived = 0`).all() as { id: string; at: number; latest: number | null }[];
+    let moved = 0;
+    for (const r of rows) if (r.latest && this.touch(r.id, Math.min(r.latest, Date.now()))) moved++;
+    return moved;
+  }
+
   upsertItems(sessionId: string, items: Item[]): ItemView[] {
     const changed: ItemView[] = [];
     const select = this.db.prepare('SELECT hash FROM items WHERE session_id = ? AND item_id = ?');

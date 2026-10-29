@@ -281,6 +281,9 @@ export class Hub {
   }
 
   start(): void {
+    // The conversation list goes by latest messages: times kept from before that are caught up once.
+    const moved = this.store.catchUpTimes();
+    if (moved) log('hub', `${moved} conversations moved on to their latest message`);
     // Hand-offs still going when the hub last stopped: keep following them, so their reports still go back.
     for (const { sessionId, item } of this.store.openHandoffs()) {
       const task = String(item.data.task ?? '');
@@ -496,6 +499,7 @@ export class Hub {
         conn.send({ t: 'ack', oid: msg.oid });
         if (changed.length) this.broadcast({ t: 'items', sessionId: id, items: changed });
         if (changed.length) this.refreshHandoffs(id);
+        this.touchFrom(id, changed);
         for (const item of changed) {
           if (item.kind === 'message' && item.data.role === 'user') {
             // Our request id when we started the turn; otherwise (queued through Codex, which assigns its own id) match by text.
@@ -748,6 +752,8 @@ export class Hub {
     if (!created) return { view, created };
     if (state === 'failed') this.store.updateRequest(view.requestId, 'failed', null, 'device_offline');
     this.broadcast({ t: 'requests', requests: [this.store.request(view.requestId)!] });
+    // Sent now: the conversation goes to the top at once, before the computer shows the message.
+    if (command.op === 'send') this.touchNow(sessionId, Date.now());
     if (files.length) {
       // What the owner sent belongs to the conversation's library too.
       const items = this.store.upsertItems(sessionId, files.map((f, i) => ({ itemId: `sent:${view.requestId}:${i}`, turnId: null, kind: 'artifact' as const,
@@ -1037,6 +1043,21 @@ export class Hub {
   private putItems(sessionId: string, items: Item[]): void {
     const changed = this.store.upsertItems(sessionId, items);
     if (changed.length) this.broadcast({ t: 'items', sessionId, items: changed });
+    this.touchFrom(sessionId, changed);
+  }
+
+  /**
+   * The conversation list goes by each conversation's latest message, as in a chat app: a message (anyone's) or a
+   * file in it moves the conversation up, whatever time the agent itself reports for it.
+   */
+  private touchFrom(sessionId: string, items: Item[]): void {
+    const latest = Math.max(0, ...items.filter((i) => i.kind === 'message' || i.kind === 'artifact' || i.kind === 'handoff').map((i) => i.ts));
+    this.touchNow(sessionId, latest);
+  }
+
+  private touchNow(sessionId: string, ms: number): void {
+    const view = ms ? this.store.touch(sessionId, Math.min(ms, Date.now())) : undefined;
+    if (view) this.broadcast({ t: 'sessions', sessions: [view], archived: [], seq: this.store.currentSeq });
   }
 
   /** The latest of a conversation as the phone shows it: messages, commands run, files, what waits for the owner. */
