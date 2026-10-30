@@ -1,14 +1,10 @@
-
-
-https://github.com/user-attachments/assets/8064f4db-f103-4ce8-91ff-b3267ee4fb08
-
-
-
 # AgentChat
 
 English | [中文](README.zh-CN.md)
 
 **Every AI agent on all your computers, in one chat app on your phone.**
+
+https://github.com/user-attachments/assets/8064f4db-f103-4ce8-91ff-b3267ee4fb08
 
 Codex, Claude Code, OpenCode, Goose, DSH (DeepSeek Harness)… running on several computers at home and at work. AgentChat puts them in your phone's contact list like friends: see what each one is doing, message them to get work done, approve their commands with a tap. They can also hand work to each other, and report back when they're done.
 

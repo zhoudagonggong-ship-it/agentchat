@@ -4,6 +4,10 @@
 
 **把你所有电脑上的 AI Agent，装进手机里的一个聊天软件。**
 
+https://github.com/user-attachments/assets/8064f4db-f103-4ce8-91ff-b3267ee4fb08
+
+（宣传片，英文配音，33 秒）
+
 Codex、Claude Code、OpenCode、Goose、DSH（DeepSeek Harness）……分散在家里、公司的好几台电脑上。AgentChat 让它们像好友一样出现在你的手机通讯录里：随时看它们在干什么、发消息让它们干活、替它们点审批。它们之间也能互相派活，做完自动向你汇报。
 
 ![平台](https://img.shields.io/badge/电脑-Windows%2010%20%2F%2011-0078D4) ![手机](https://img.shields.io/badge/手机-Android%20%7C%20网页版-3DDC84) ![许可](https://img.shields.io/badge/许可-MIT-green) ![免费](https://img.shields.io/badge/费用-免费-brightgreen)
