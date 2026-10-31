@@ -1,5 +1,6 @@
 // Maps OpenCode 2.x messages to the hub's item kinds. Reasoning and system notices are never reported.
-// OpenCode has no turn ids: a turn is everything from one user message to the next, named after that message.
+// OpenCode has no turn ids: a turn is everything from one user message until OpenCode goes idle, named after that
+// message. Messages sent while it runs join the running turn: OpenCode answers them in the same run, with one idle.
 import type { Item } from '../../shared/protocol.ts';
 
 const OUTPUT_TAIL = 4000;
@@ -32,27 +33,45 @@ function summary(input: Record<string, unknown> | undefined): string {
   return typeof v === 'string' ? v : input ? JSON.stringify(input).slice(0, 200) : '';
 }
 
+/** The turn at the end of what was read, and whether it was still running. */
+export interface Run {
+  turn: string;
+  start: number;
+  running: boolean;
+}
+
 export interface Normalized {
   items: Item[];
   files: OutputFile[];
   /** The turn in progress (or last finished) at the end of these messages. */
   turnId: string | null;
+  /** That turn as the next read carries it on. */
+  run: Run | null;
   preview: string | null;
 }
 
-/** `messages` oldest first; `clientIds` maps OpenCode's id of a message sent from the phone to its request id. */
-export function normalizeMessages(messages: any[], clientIds: Map<string, string>): Normalized {
+/**
+ * `messages` oldest first; `clientIds` maps OpenCode's id of a message sent from the phone to its request id.
+ * `before`: the run the previous read ended in. Only the latest messages are read, and a long run's first message
+ * may have dropped out of them: the run goes on under its own name, not under the next message's.
+ */
+export function normalizeMessages(messages: any[], clientIds: Map<string, string>, before?: Run): Normalized {
   const items: Item[] = [];
   const files: OutputFile[] = [];
-  let turn: string | null = null;
-  let turnStart = 0;
+  const carried = before && !messages.some((m) => m.id === before.turn) ? before : undefined;
+  let turn: string | null = carried?.turn ?? null;
+  let turnStart = carried?.start ?? 0;
+  let running = carried?.running ?? false;
   let preview: string | null = null;
   for (const m of messages) {
     const ts = Number(m.time?.created) || 0;
     switch (m.type) {
       case 'user': {
-        turn = m.id;
-        turnStart = ts;
+        if (!running) {
+          turn = m.id;
+          turnStart = ts;
+          running = true;
+        }
         const text = typeof m.text === 'string' ? m.text : m.payload?.text ?? '';
         items.push({ itemId: m.id, turnId: turn, kind: 'message', ts, data: { role: 'user', text, clientId: clientIds.get(m.id) ?? null } });
         preview = text || preview;
@@ -79,6 +98,7 @@ export function normalizeMessages(messages: any[], clientIds: Map<string, string
         break;
       }
       case 'idle':
+        running = false;
         if (turn) {
           const status = m.outcome === 'succeeded' ? 'completed' : m.outcome === 'interrupted' ? 'interrupted' : 'failed';
           // Why it failed, as OpenCode says it (a model's quota used up, say): the owner and the sender need to know.
@@ -91,5 +111,5 @@ export function normalizeMessages(messages: any[], clientIds: Map<string, string
         break; // system notices, model and agent switches, compaction stay on the computer
     }
   }
-  return { items, files, turnId: turn, preview };
+  return { items, files, turnId: turn, run: turn ? { turn, start: turnStart, running } : null, preview };
 }

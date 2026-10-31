@@ -14,7 +14,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import type { Adapter, AdapterSink } from '../device.ts';
 import type { AgentInfo, Command, Item, SessionInfo } from '../../shared/protocol.ts';
-import { CONTROL_PORT, withAttachments } from '../../shared/protocol.ts';
+import { CONTROL_PORT, carriesTag, recordsCall, withAttachments } from '../../shared/protocol.ts';
 import { debounce, log } from '../../shared/util.ts';
 import { readFrom, readHeader, readLatest } from './log.ts';
 import { normalizeEvents, type DshEvent } from './normalize.ts';
@@ -110,7 +110,7 @@ export class DshAdapter implements Adapter {
   private workspaces: { id: string; name: string }[] = [];
   private refreshing = false;
   private refreshAgain = false;
-  private readonly scheduleRefresh = debounce(() => void this.refresh(), 700);
+  private readonly scheduleRefresh = debounce(() => void this.refresh(), 700, 2000); // read even while a run writes on
 
   async start(sink: AdapterSink): Promise<void> {
     this.sink = sink;
@@ -129,6 +129,34 @@ export class DshAdapter implements Adapter {
     } catch (error) {
       log('dsh', `cannot watch ${SESSIONS}: ${(error as Error).message}; checking on each tick instead`);
     }
+  }
+
+  /** The conversations whose log holds a message with this tag, among the logs written in the last half hour. */
+  locate(tag: string): string[] {
+    const out: string[] = [];
+    for (const [threadId, f] of this.files) {
+      try {
+        if (statSync(f.file).mtimeMs < Date.now() - 30 * 60_000) continue;
+        if (readLatest(f.file, 200).events.some((e) => carriesTag(JSON.stringify(e.data ?? ''), tag))) out.push(threadId);
+      } catch {
+        // being written: looked at again shortly
+      }
+    }
+    return out;
+  }
+
+  /** The conversations whose log shows a call of the AgentChat tool carrying the message `key` stands for, in the last two minutes. */
+  caller(key: string): string[] {
+    const out: string[] = [];
+    for (const [threadId, f] of this.files) {
+      try {
+        if (statSync(f.file).mtimeMs < Date.now() - 120_000) continue;
+        if (readLatest(f.file, 100).events.some((e) => e.type === 'tool/call' && recordsCall(JSON.stringify(e.data ?? ''), key))) out.push(threadId);
+      } catch {
+        // being written: looked at again shortly
+      }
+    }
+    return out;
   }
 
   hydrate(threadId: string): void {

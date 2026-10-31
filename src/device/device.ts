@@ -1,9 +1,11 @@
 // The device side: connects local agents to the hub. Runs on every machine, including the hub itself.
 import { DatabaseSync } from 'node:sqlite';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { basename, extname, join } from 'node:path';
 import type { AgentInfo, AskOp, Attachment, Command, DeviceToHub, HubRef, HubToDevice, Item, MemberSeed, ProjectInfo, RequestState, SessionInfo } from '../shared/protocol.ts';
-import { PROTOCOL_VERSION } from '../shared/protocol.ts';
+import { PROTOCOL_VERSION, callKey, markTag } from '../shared/protocol.ts';
 import { log, sha256 } from '../shared/util.ts';
 import { activity } from '../activity.ts';
 import type { Transport } from '../link.ts';
@@ -39,12 +41,46 @@ export interface Adapter {
    * `first` and says so (`sent`), receipts and all; the others leave `first` to be sent as usual.
    */
   create?(cwd: string, title: string, first?: Command): Promise<{ threadId: string; sent?: boolean }>;
-  /** The conversation calling the AgentChat tool right now, when the agent's tools are not told (Codex). */
-  callerThread?(): string | null;
+  /**
+   * The conversations (thread ids) whose records show a call of AgentChat's tool carrying the message `key` stands for
+   * (see callKey), made in the last minutes: how the sender of a message is known, when the tool is not told.
+   */
+  caller?(key: string): string[] | Promise<string[]>;
   /** Work of ours under way here (a turn we run, an approval waiting): restarting this program now would cut it off. */
   busy?(): boolean;
   /** A cheap look for changes the agent's files did not announce (every hub tick, 30 s); most adapters need none. */
   poll?(): void;
+  /**
+   * The conversations (thread ids) holding a message whose mark carries `tag`, shown or waiting to be taken up, as the
+   * agent's own records say: how a message put in is checked, whatever the putting in looked like.
+   */
+  locate?(tag: string): string[] | Promise<string[]>;
+}
+
+/** How long a message put in is looked for before the hub hears it is nowhere (a window can take a while to show it). */
+const VERIFY_MS = 90_000;
+const VERIFY_EVERY_MS = 2_000;
+/** How long an agent's records are watched for the call of AgentChat's tool that sends a message (see callerOf). */
+const CALLER_WAIT_MS = 3_000;
+/** Files the hub lacks, sent at most this much per asking. */
+const SEND_FILES_BYTES = 100 * 1024 * 1024;
+
+/** Program code and the like: what an agent writes while working, not something made for the owner. */
+const WORK_FILES = new Set(['ts', 'tsx', 'js', 'mjs', 'cjs', 'jsx', 'py', 'ps1', 'psm1', 'cmd', 'bat', 'sh', 'java', 'kt', 'cs', 'go', 'rs', 'c', 'h',
+  'cpp', 'hpp', 'swift', 'rb', 'php', 'lua', 'sql', 'json', 'jsonl', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'xml', 'html', 'htm', 'css', 'scss',
+  'vbs', 'reg', 'lock', 'log', 'env', 'gitignore', 'map', 'd']);
+
+/**
+ * Whether a file an agent wrote is one of its results for the owner (a picture, video, sound, document, sheet,
+ * slides, PDF, text) rather than part of its work: program code, settings, or anything in a hidden folder (.claude,
+ * .git…). Files an agent links in its reply are the owner's whatever they are (see linkFiles).
+ */
+export function isOutput(path: string): boolean {
+  const parts = path.split(/[\\/]/);
+  if (parts.slice(0, -1).some((p) => p.startsWith('.') && p.length > 1) || parts.includes('node_modules')) return false;
+  const name = parts.at(-1) ?? '';
+  const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : '';
+  return !name.startsWith('.') && !WORK_FILES.has(ext);
 }
 
 type Outgoing = Extract<DeviceToHub, { oid: number }>;
@@ -56,7 +92,28 @@ export class Device {
   status: LinkStatus = 'connecting';
   statusDetail = '';
   onStatus: () => void = () => {};
-  onHubMoved: (hub: HubRef, members?: MemberSeed[], handover?: string) => void = () => {};
+  onHubMoved: (msg: Extract<HubToDevice, { t: 'hubMoved' }>) => void = () => {};
+  /** The hub's record as it changes, for this computer's copy (replica.ts), and who is on duty (shift.ts). */
+  onReplica: (msg: Extract<HubToDevice, { t: 'replica' | 'replicaSnapshot' }>) => void = () => {};
+  onShift: (msg: Extract<HubToDevice, { t: 'shift' }>) => void = () => {};
+
+  /** A word to the hub (dropped while not connected: the next connection asks again). */
+  tell(msg: DeviceToHub): void {
+    if (this.active) this.transport.send(msg);
+  }
+
+  /**
+   * Goes over to another hub without stopping anything here: the agents and their work carry on, what waits in the
+   * outbox goes to the new hub.
+   */
+  relink(transport: Transport): void {
+    this.transport.stop();
+    this.active = false;
+    this.transport = transport;
+    this.setStatus('connecting');
+    this.listen();
+    transport.start();
+  }
   /** The program's fingerprint, sent with hello; null: this copy does not take updates. */
   code: string | null = null;
   onUpdate: (version: string, data: Buffer) => void = () => {};
@@ -83,6 +140,13 @@ export class Device {
   presence(idleMs: number, locked: boolean): void {
     if (this.active) this.transport.send({ t: 'presence', idleMs, locked });
   }
+
+  /** Voice input: what the hub asks of this computer (listen, finish, paste). */
+  onVoice: (msg: Extract<HubToDevice, { t: 'voice' }>) => void = () => {};
+  /** Voice input: the hotkey pressed here, the words heard here, or given up. */
+  voice(msg: Extract<DeviceToHub, { t: 'voice' }>): void {
+    if (this.active) this.transport.send(msg);
+  }
   private readonly db: DatabaseSync;
   private readonly adapters = new Map<string, Adapter>();
   private readonly lastSessions = new Map<string, SessionInfo[]>();
@@ -91,13 +155,19 @@ export class Device {
   private readonly inflight = new Map<number, number>(); // outbox rows sent on this connection, not acknowledged yet: oid -> bytes
   private sentUpTo = 0;
   private started = false;
-  private readonly asks = new Map<number, { resolve(v: unknown): void; reject(e: Error): void }>();
+  private readonly asks = new Map<number, { resolve(v: unknown): void; reject(e: Error): void; again?(): void }>();
+  private readonly takenOn = new Set<string>(); // requests this run of the program took on
+  /** Messages being put in, to look for once the adapter says they are in. */
+  private readonly verifying = new Map<string, { agentId: string; threadId: string; mark: string; attempt: number }>();
   private askSeq = 0;
+  private readonly linkedFiles = new Set<string>(); // agent|thread|sha256 of files linked in replies, sent to the hub
+  private readonly linkCache = new Map<string, { sha256: string; data: Buffer; mtimeMs: number }>();
   private readonly id: string;
   private readonly name: string;
   private readonly secret: string;
-  private readonly transport: Transport;
+  private transport: Transport;
   private readonly inbox: string;
+  private readonly dataDir: string;
 
   constructor(dataDir: string, id: string, name: string, secret: string, transport: Transport) {
     this.id = id;
@@ -105,10 +175,39 @@ export class Device {
     this.secret = secret;
     this.transport = transport;
     this.inbox = join(dataDir, 'inbox');
+    this.dataDir = dataDir;
     this.db = new DatabaseSync(join(dataDir, 'device.sqlite'));
     this.db.exec(`PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS outbox (oid INTEGER PRIMARY KEY AUTOINCREMENT, msg TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS receipts (request_id TEXT PRIMARY KEY, state TEXT NOT NULL, turn_id TEXT, error TEXT, at INTEGER NOT NULL);`);
+  }
+
+  private sendingFiles = false;
+  /**
+   * The hub lacks files its record names: the ones kept here (from this computer's time as hub, or its copy of the
+   * record) go to it, up to SEND_FILES_BYTES a time (it asks again for the rest).
+   */
+  private async sendFiles(wanted: string[]): Promise<void> {
+    if (this.sendingFiles) return;
+    this.sendingFiles = true;
+    let bytes = 0;
+    let sent = 0;
+    try {
+      for (const sha of wanted) {
+        if (!/^[0-9a-f]{64}$/.test(sha) || bytes > SEND_FILES_BYTES || !this.active) break;
+        const path = [join(this.dataDir, 'artifacts', sha), join(this.dataDir, 'replica', 'artifacts', sha)].find((p) => existsSync(p));
+        if (!path) continue;
+        const data = await readFile(path);
+        if (sha256(data) !== sha) continue;
+        this.transport.send({ t: 'file', sha256: sha, name: 'file', size: data.length, mime: 'application/octet-stream', data: data.toString('base64') });
+        bytes += data.length;
+        sent++;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (sent) log('device', `sent the hub ${sent} files it lacked (${(bytes / 1048576).toFixed(1)} MB)`);
+    } finally {
+      this.sendingFiles = false;
+    }
   }
 
   /** An agent found later, while running, starts at once and the hub hears of it. */
@@ -135,16 +234,24 @@ export class Device {
     this.onStatus();
   }
 
-  async start(): Promise<void> {
-    this.transport.handlers = {
-      connected: () => this.transport.send({ t: 'hello', v: PROTOCOL_VERSION, deviceId: this.id, name: this.name, secret: this.secret,
-        agents: [...this.adapters.values()].map((a) => a.info), ...(this.code ? { code: this.code } : {}) }),
+  private listen(): void {
+    const transport = this.transport;
+    transport.handlers = {
+      connected: () => transport.send({ t: 'hello', v: PROTOCOL_VERSION, deviceId: this.id, name: this.name, secret: this.secret,
+        agents: [...this.adapters.values()].map((a) => a.info), ...(this.code ? { code: this.code } : {}), host: hostname() }),
       disconnected: (reason) => {
+        if (transport !== this.transport) return;
         this.active = false;
         if (this.status !== 'rejected') this.setStatus('connecting', reason ?? '');
       },
-      message: (msg) => this.onHub(msg),
+      message: (msg) => {
+        if (transport === this.transport) this.onHub(msg);
+      },
     };
+  }
+
+  async start(): Promise<void> {
+    this.listen();
     this.transport.start();
     this.started = true;
     for (const adapter of this.adapters.values()) void this.startAdapter(adapter, 15_000);
@@ -176,6 +283,8 @@ export class Device {
         this.inflight.clear();
         this.sentUpTo = 0;
         this.pump();
+        // Waits still going: a hub that restarted no longer knows them (one that did not answers the first copy).
+        for (const a of this.asks.values()) a.again?.();
         for (const r of this.db.prepare('SELECT * FROM receipts WHERE at > ?').all(Date.now() - 86_400_000) as { request_id: string; state: RequestState; turn_id: string | null; error: string | null }[]) {
           this.transport.send({ t: 'receipt', requestId: r.request_id, state: r.state, turnId: r.turn_id ?? undefined, error: r.error ?? undefined });
         }
@@ -189,7 +298,17 @@ export class Device {
         this.setStatus('rejected', msg.reason);
         break;
       case 'hubMoved':
-        this.onHubMoved(msg.hub, msg.members, msg.handover);
+        this.onHubMoved(msg);
+        break;
+      case 'replica':
+      case 'replicaSnapshot':
+        this.onReplica(msg);
+        break;
+      case 'shift':
+        this.onShift(msg);
+        break;
+      case 'wantFiles':
+        void this.sendFiles(msg.sha256);
         break;
       case 'update':
         if (this.code) this.onUpdate(msg.version, Buffer.from(msg.data, 'base64'));
@@ -218,13 +337,20 @@ export class Device {
       case 'alert':
         this.onAlert({ title: msg.title, text: msg.text, url: msg.url });
         break;
+      case 'voice':
+        this.onVoice(msg);
+        break;
       case 'create': {
         const adapter = this.adapters.get(msg.agentId);
         if (!adapter?.create) {
           this.transport.send({ t: 'created', id: msg.id, error: `${adapter?.info.label ?? '这个 Agent'}还不支持新建对话，请发到它已有的对话` });
           break;
         }
-        adapter.create(msg.cwd, msg.title, msg.first).then(({ threadId, sent }) => {
+        // Files of the first message land in the inbox first, so the message names where they are (as any message does).
+        const first = msg.first?.files?.length
+          ? this.saveAttachments(msg.first.files, msg.data ?? []).then((files) => ({ ...msg.first!, files }))
+          : Promise.resolve(msg.first);
+        first.then((cmd) => adapter.create!(msg.cwd, msg.title, cmd)).then(({ threadId, sent }) => {
           // A first message the adapter sent itself has run, like any command: never run it a second time.
           if (sent && msg.first) this.db.prepare('INSERT OR IGNORE INTO receipts(request_id, state, at) VALUES (?, ?, ?)').run(msg.first.requestId, 'accepted', Date.now());
           this.transport.send({ t: 'created', id: msg.id, threadId, sent });
@@ -243,46 +369,128 @@ export class Device {
 
   /** An agent here uses the AgentChat tool: the hub answers (lists agents, sends on its behalf, waits for a reply). */
   ask(op: AskOp, agentId: string, args: Record<string, unknown>, timeoutMs: number, thread?: string): Promise<unknown> {
-    if (!this.active) return Promise.reject(new Error('本机还没有连上主电脑'));
+    // Waiting only looks: it can wait for the hub too (restarting, say) and be asked again once it is back.
+    if (!this.active && op !== 'wait') return Promise.reject(new Error('本机还没有连上主电脑'));
     // Files the agent hands along (paths on this computer): to the hub first, then named in the message by their hash.
     if (op === 'send' && Array.isArray(args.files) && args.files.some((f) => typeof f === 'string')) {
       return this.handFiles(args.files).then((files) => this.ask(op, agentId, { ...args, files }, timeoutMs, thread));
     }
-    // Not told by the tool: the agent may know where the call comes from (its records show it as it is made).
-    if (!thread) {
+    // Not told by the tool: the agent's own records show the call as it is made, message and all.
+    if (!thread && op === 'send') return this.callerOf(agentId, String(args.text ?? '')).then((t) => this.askHub(op, agentId, args, timeoutMs, t));
+    return this.askHub(op, agentId, args, timeoutMs, thread);
+  }
+
+  /**
+   * Which conversation of this agent sends `text`: the one whose records hold the call carrying it. The records may be
+   * written a moment after the call reaches us, so they are looked at for up to CALLER_WAIT_MS. Two conversations
+   * sending the same words at once cannot be told apart: then nobody is named, and the hub raises it.
+   */
+  private async callerOf(agentId: string, text: string): Promise<string | undefined> {
+    const adapter = this.adapters.get(agentId);
+    const key = callKey(text);
+    if (!adapter?.caller || !key) return undefined;
+    for (const until = Date.now() + CALLER_WAIT_MS; ;) {
+      let found: string[] = [];
       try {
-        thread = this.adapters.get(agentId)?.callerThread?.() ?? undefined;
+        found = [...new Set((await adapter.caller(key)) ?? [])];
       } catch {
-        thread = undefined; // records being written: the hub falls back to what is running
+        // records being written: looked at again in a moment
       }
+      if (found.length === 1) return found[0];
+      if (found.length > 1 || Date.now() >= until) {
+        log('device', `${agentId}: no single conversation sends "${key}" (${found.length} found)`);
+        return undefined;
+      }
+      await new Promise((r) => setTimeout(r, 250));
     }
+  }
+
+  private askHub(op: AskOp, agentId: string, args: Record<string, unknown>, timeoutMs: number, thread?: string): Promise<unknown> {
     const id = ++this.askSeq;
+    const until = Date.now() + Math.min(60, Math.max(0, Number(args.minutes ?? 10))) * 60_000;
+    // A wait cut off by the hub restarting (it forgets what it was asked) is asked again for the minutes left.
+    const send = () => this.transport.send({ t: 'ask', id, op, agentId, ...(thread ? { thread } : {}),
+      args: op === 'wait' ? { ...args, minutes: Math.max(0, (until - Date.now()) / 60_000) } : args });
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.asks.delete(id);
-        reject(new Error('主电脑没有回应'));
+        reject(new Error(this.active ? '主电脑没有回应' : '主电脑一直没有连上（可能在重启），稍后再用 wait 查'));
       }, timeoutMs);
-      this.asks.set(id, { resolve: (v) => (clearTimeout(timer), resolve(v)), reject: (e) => (clearTimeout(timer), reject(e)) });
-      this.transport.send({ t: 'ask', id, op, agentId, args, ...(thread ? { thread } : {}) });
+      this.asks.set(id, { resolve: (v) => (clearTimeout(timer), resolve(v)), reject: (e) => (clearTimeout(timer), reject(e)),
+        ...(op === 'wait' ? { again: send } : {}) });
+      if (this.active) send();
     });
   }
 
   private async onCommand(agentId: string, threadId: string, command: Command, data?: string[]): Promise<void> {
-    // Each request runs at most once; a repeat only repeats its receipt.
-    const seen = this.db.prepare('SELECT state, turn_id, error FROM receipts WHERE request_id = ?').get(command.requestId) as { state: RequestState; turn_id: string | null; error: string | null } | undefined;
-    if (seen) return this.transport.send({ t: 'receipt', requestId: command.requestId, state: seen.state, turnId: seen.turn_id ?? undefined, error: seen.error ?? undefined });
-    const adapter = this.adapters.get(agentId);
+    const attempt = command.attempt ?? 0;
     const sink = this.sinkFor(agentId);
-    if (!adapter) return sink.receipt(command.requestId, 'failed', undefined, 'agent_unavailable');
-    // Recorded before acting: a crash in between leaves "unknown", never a silent second run.
-    this.db.prepare('INSERT INTO receipts(request_id, state, at) VALUES (?, ?, ?)').run(command.requestId, 'unknown', Date.now());
+    const adapter = this.adapters.get(agentId);
+    const mark = command.op === 'send' ? markTag(command.text ?? '') : null;
+    if (attempt) {
+      // Sent again: once per attempt, and only if it is not where it belongs by now (it got there late, say).
+      const key = `${command.requestId}#${attempt}`;
+      if (this.db.prepare('SELECT 1 FROM receipts WHERE request_id = ?').get(key)) return;
+      this.db.prepare('INSERT INTO receipts(request_id, state, at) VALUES (?, ?, ?)').run(key, 'unknown', Date.now());
+      if (!adapter) return sink.receipt(command.requestId, 'failed', undefined, 'agent_unavailable');
+      if (mark && adapter.locate) {
+        const found = await this.locate(adapter, mark);
+        if (found.includes(threadId)) return this.enqueue({ t: 'landed', requestId: command.requestId, attempt, agentId, found, done: true });
+      }
+    } else {
+      // Each request runs at most once; a repeat only repeats its receipt.
+      const seen = this.db.prepare('SELECT state, turn_id, error FROM receipts WHERE request_id = ?').get(command.requestId) as { state: RequestState; turn_id: string | null; error: string | null } | undefined;
+      // Except one that was waiting for its window when this program last stopped: the wait went with it. The adapter
+      // looks in the conversation before it types, so one that got in meanwhile still goes in only once.
+      const waitLost = seen?.state === 'pending' && seen.error === 'waiting_for_window' && !this.takenOn.has(command.requestId);
+      if (seen && !waitLost) return this.transport.send({ t: 'receipt', requestId: command.requestId, state: seen.state, turnId: seen.turn_id ?? undefined, error: seen.error ?? undefined });
+      if (!adapter) return sink.receipt(command.requestId, 'failed', undefined, 'agent_unavailable');
+      // Recorded before acting: a crash in between leaves "unknown", never a silent second run.
+      this.db.prepare(`INSERT INTO receipts(request_id, state, at) VALUES (?, ?, ?)
+        ON CONFLICT(request_id) DO UPDATE SET state = excluded.state, error = NULL, at = excluded.at`).run(command.requestId, 'unknown', Date.now());
+    }
+    this.takenOn.add(command.requestId);
+    // Once the adapter says it is in, its own records are looked through for where it really went (see verify).
+    if (mark) this.verifying.set(command.requestId, { agentId, threadId, mark, attempt });
     const label = { send: '收到手机发来的消息', interrupt: '收到停止指令', approve: '收到审批结果', cancel: '' }[command.op];
     if (label) activity(`${label}（${adapter.info.label}）`);
     try {
       if (command.files?.length) command = { ...command, files: await this.saveAttachments(command.files, data ?? []) };
       await adapter.command(threadId, command);
     } catch (error) {
+      this.verifying.delete(command.requestId);
       sink.receipt(command.requestId, 'failed', undefined, (error as Error).message.slice(0, 300));
+    }
+  }
+
+  private async locate(adapter: Adapter, mark: string): Promise<string[]> {
+    try {
+      return [...new Set((await adapter.locate!(mark)) ?? [])].sort();
+    } catch {
+      return []; // records being written: looked at again shortly
+    }
+  }
+
+  /**
+   * After the adapter has put a message in: where did it really go? Its records are looked through for the message's
+   * tag until it shows in its own conversation, or for VERIFY_MS. The hub hears each new finding (in some other
+   * conversation by mistake, say) and the last word, and decides what to do about it.
+   */
+  private async verify(requestId: string): Promise<void> {
+    const v = this.verifying.get(requestId);
+    const adapter = v && this.adapters.get(v.agentId);
+    if (!v || !adapter) return;
+    this.verifying.delete(requestId);
+    if (!adapter.locate) return this.enqueue({ t: 'landed', requestId, attempt: v.attempt, agentId: v.agentId, found: null, done: true });
+    const until = Date.now() + VERIFY_MS;
+    let told = '';
+    for (;;) {
+      const found = (await this.locate(adapter, v.mark)) ?? [];
+      const done = found.includes(v.threadId) || Date.now() >= until;
+      if (done || found.join('|') !== told) this.enqueue({ t: 'landed', requestId, attempt: v.attempt, agentId: v.agentId, found, done });
+      if (done) return;
+      told = found.join('|');
+      await new Promise((r) => setTimeout(r, VERIFY_EVERY_MS));
     }
   }
 
@@ -338,9 +546,11 @@ export class Device {
         if (this.active) this.transport.send({ t: 'projects', agentId, projects });
       },
       items: (threadId, items) => {
-        if (items.length) this.enqueue({ t: 'items', agentId, threadId, items });
+        if (items.length) this.enqueue({ t: 'items', agentId, threadId, items: items.map((i) => this.linkFiles(agentId, threadId, i)) });
       },
-      artifact: (threadId, itemId, turnId, path) => void this.uploadArtifact(agentId, threadId, itemId, turnId, path),
+      artifact: (threadId, itemId, turnId, path) => {
+        if (isOutput(path)) void this.uploadArtifact(agentId, threadId, itemId, turnId, path);
+      },
       artifactData: (threadId, itemId, turnId, name, mime, data, sent) => {
         if (data.length > MAX_ARTIFACT_BYTES) return;
         this.enqueue({ t: 'artifact', agentId, threadId, itemId, turnId, name, size: data.length, sha256: sha256(data), mime,
@@ -354,6 +564,8 @@ export class Device {
           ON CONFLICT(request_id) DO UPDATE SET state = excluded.state, turn_id = COALESCE(excluded.turn_id, turn_id), error = excluded.error, at = excluded.at`)
           .run(requestId, state, turnId ?? null, error ?? null, Date.now());
         this.transport.send({ t: 'receipt', requestId, state, turnId, error });
+        if (state === 'accepted') void this.verify(requestId);
+        else if (state === 'failed') this.verifying.delete(requestId);
       },
     };
   }
@@ -381,6 +593,53 @@ export class Device {
       out.push(file);
     }
     return out;
+  }
+
+  /**
+   * An agent's reply that links a file on this computer (Markdown `![picture](D:/out/shot.png)` or `[report](…)`):
+   * the computer's app shows it, a phone could not reach it. The file goes to the hub with the reply, and the link
+   * names it there (`/files/<sha256>`), so the phone shows the picture and opens the file.
+   */
+  private linkFiles(agentId: string, threadId: string, item: Item): Item {
+    const text = item.kind === 'message' && item.data.role === 'assistant' ? item.data.text : null;
+    if (typeof text !== 'string' || !text.includes('](')) return item;
+    const linked = text.replace(/(!?\[[^\]\n]*\])\(<?([^)<>\n]+?)>?\)/g, (whole, label: string, target: string) => {
+      let path = target.trim();
+      try {
+        path = decodeURI(path.replace(/^file:\/\/\/?/i, ''));
+      } catch {
+        // not URI-encoded: as written
+      }
+      if (!/^(?:[A-Za-z]:[\\/]|\/(?!files\/))/.test(path)) return whole; // web links and relative names stay as they are
+      const file = this.fileForLink(path);
+      if (!file) return whole;
+      const key = `${agentId}|${threadId}|${file.sha256}`;
+      if (!this.linkedFiles.has(key)) {
+        this.linkedFiles.add(key);
+        const name = basename(path);
+        this.enqueue({ t: 'artifact', agentId, threadId, itemId: `link:${file.sha256}`, turnId: item.turnId, name, size: file.data.length,
+          sha256: file.sha256, mime: MIME[extname(name).toLowerCase()] ?? 'application/octet-stream', data: file.data.toString('base64') });
+      }
+      return `${label}(/files/${file.sha256})`;
+    });
+    return linked === text ? item : { ...item, data: { ...item.data, text: linked } };
+  }
+
+  /** A linked file read once while it stays the same (replies are reported again and again). */
+  private fileForLink(path: string): { sha256: string; data: Buffer } | null {
+    try {
+      const info = statSync(path);
+      if (!info.isFile() || info.size > MAX_ARTIFACT_BYTES) return null;
+      const seen = this.linkCache.get(path);
+      if (seen && seen.mtimeMs === info.mtimeMs && seen.data.length === info.size) return seen;
+      const data = readFileSync(path);
+      const file = { sha256: sha256(data), data, mtimeMs: info.mtimeMs };
+      this.linkCache.set(path, file);
+      if (this.linkCache.size > 50) this.linkCache.delete(this.linkCache.keys().next().value!);
+      return file;
+    } catch {
+      return null;
+    }
   }
 
   private async uploadArtifact(agentId: string, threadId: string, itemId: string, turnId: string | null, path: string): Promise<void> {

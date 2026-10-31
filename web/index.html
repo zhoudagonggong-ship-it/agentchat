@@ -32,9 +32,14 @@
       </section>
       <section class="page" data-page="library">
         <header class="bar"><h1>资料库</h1></header>
-        <div class="search"><input id="files-q" type="search" placeholder="搜索文件或对话"></div>
-        <div id="files-filter" class="chips"></div>
-        <div id="files-all" class="scroll"></div>
+        <div id="lib-tabs" class="chips lib-tabs"><button data-lib="chat" class="on">聊天文件</button><button data-lib="drive">网盘</button></div>
+        <div class="search lib-chat"><input id="files-q" type="search" placeholder="搜索文件或对话"></div>
+        <div id="files-filter" class="chips lib-chat"></div>
+        <div id="files-all" class="scroll lib-chat"></div>
+        <div id="drive-bar" class="drive-bar lib-drive" hidden><div id="drive-crumbs" class="crumbs"></div>
+          <button id="drive-mkdir" class="link">新建文件夹</button><button id="drive-upload" class="link">上传</button>
+          <input id="drive-input" type="file" multiple hidden></div>
+        <div id="drive" class="scroll lib-drive" hidden></div>
       </section>
       <nav id="nav" class="nav">
         <button data-tab="project"><i class="ico ico-project"></i>Agent</button>

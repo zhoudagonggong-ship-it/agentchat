@@ -36,6 +36,9 @@ $Tray.Text = 'AgentChat · 启动中'
 $Tray.Visible = $true
 $Menu = New-Object System.Windows.Forms.ContextMenuStrip
 $OpenItem = $Menu.Items.Add('打开 AgentChat')
+# 别的 Agent 发来、因为主人正在用电脑而先等着的消息：有的时候才显示。
+$HeldItem = $Menu.Items.Add('现在送进去')
+$HeldItem.Visible = $false
 $PauseItem = $Menu.Items.Add('暂停')
 $RescanItem = $Menu.Items.Add('重新检测 Agent')
 $DiagItem = $Menu.Items.Add('导出诊断信息')
@@ -90,6 +93,7 @@ function Update-Tray($state) {
 }
 
 $OpenItem.add_Click({ Open-Window })
+$HeldItem.add_Click({ Send-Worker 'sendnow' })
 $Tray.add_MouseClick({ param($s, $e) if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Open-Window } })
 $PauseItem.add_Click({ if ($script:Paused) { Send-Worker 'resume' } else { Send-Worker 'pause' } })
 $RescanItem.add_Click({ Send-Worker 'rescan' })
@@ -111,8 +115,12 @@ public static uint IdleMs() { var l = new L(); l.cbSize = (uint)Marshal.SizeOf(l
 '@
 $script:PresenceAt = [DateTime]::MinValue
 $script:AlertUrl = $null
-# 点提醒气泡：打开那个对话。
-$Tray.add_BalloonTipClicked({ if ($script:AlertUrl) { Start-Process $script:AlertUrl } })
+$script:AlertAction = $null
+# 点提醒气泡：等着的消息就现在送进去；别的提醒打开那个对话。
+$Tray.add_BalloonTipClicked({
+  if ($script:AlertAction) { Send-Worker $script:AlertAction }
+  elseif ($script:AlertUrl) { Start-Process $script:AlertUrl }
+})
 
 $Timer = New-Object System.Windows.Forms.Timer
 $Timer.Interval = 250
@@ -122,10 +130,16 @@ $Timer.add_Tick({
       $line = $script:ReadTask.Result
       if ($null -eq $line) { $script:ReadTask = $null; break }
       if ($line.StartsWith('@@tray ')) { try { Update-Tray ($line.Substring(7) | ConvertFrom-Json) } catch {} }
+      if ($line.StartsWith('@@held ')) {
+        $n = [int]$line.Substring(7)
+        $HeldItem.Text = "现在送进去（$n 条消息在等你）"
+        $HeldItem.Visible = $n -gt 0
+      }
       if ($line.StartsWith('@@alert ')) {
         try {
           $a = $line.Substring(8) | ConvertFrom-Json
           $script:AlertUrl = $a.url
+          $script:AlertAction = $a.action
           $Tray.ShowBalloonTip(8000, [string]$a.title, [string]$a.text, [System.Windows.Forms.ToolTipIcon]::Info)
         } catch {}
       }

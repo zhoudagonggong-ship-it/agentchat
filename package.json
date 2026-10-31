@@ -1,6 +1,6 @@
 {
   "name": "allinone",
-  "version": "2026.10.29",
+  "version": "2026.10.30",
   "private": true,
   "type": "module",
   "description": "在手机上查看和操作每台电脑上的 AI Agent",
@@ -10,7 +10,7 @@
   },
   "scripts": {
     "start": "node src/main.ts",
-    "test": "node --test \"test/**/*.test.ts\""
+    "test": "node tools/test.mjs"
   },
   "dependencies": {
     "ws": "8.22.0"

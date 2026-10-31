@@ -13,9 +13,10 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { Adapter, AdapterSink } from '../device.ts';
 import type { AgentInfo, Command, Item, SessionInfo } from '../../shared/protocol.ts';
-import { withAttachments } from '../../shared/protocol.ts';
+import { carriesTag, recordsCall, withAttachments } from '../../shared/protocol.ts';
 import { debounce, log } from '../../shared/util.ts';
-import { normalizeRows, textItemId, type MessageRow, type OutputFile } from './normalize.ts';
+import { activity } from '../../activity.ts';
+import { normalizeRows, opensTurn, textItemId, type MessageRow, type OutputFile } from './normalize.ts';
 import { TOOL_NAME, installHint, toolCommand } from '../tool.ts';
 
 const HYDRATE_ROWS = 400;
@@ -36,6 +37,10 @@ const DESKTOP_SEND = join(import.meta.dirname, 'desktop-send.ps1');
 // then; any other answer (in use, locked, a draft, a running turn) means waiting for the window, never going around it.
 const BACKGROUND_OK = new Set(['no_window', 'not_listed']);
 const WINDOW_WAIT_MS = 2 * 3_600_000;
+// The window is free but will not show the conversation: that does not pass by waiting; after a minute the message
+// goes through goose acp instead.
+const STUCK = new Set(['not_opened', 'no_prompt_box']);
+const STUCK_MS = 60_000;
 
 function shorten(text: string | null): string | null {
   const s = text ? text.replace(/\s+/g, ' ').trim() : '';
@@ -134,7 +139,7 @@ export class GooseAdapter implements Adapter {
   private readonly windowQueues = new Map<string, Promise<boolean>>(); // messages waiting for the window, by conversation
   private refreshing = false;
   private refreshAgain = false;
-  private readonly scheduleRefresh = debounce(() => void this.refresh(), 700);
+  private readonly scheduleRefresh = debounce(() => void this.refresh(), 700, 2000); // read even while a run writes on
 
   constructor(dataDir: string) {
     this.exeFile = join(dataDir, 'goose-exe.txt');
@@ -280,6 +285,30 @@ export class GooseAdapter implements Adapter {
     return this.runs.size > 0 || this.approvals.size > 0 || this.windowQueues.size > 0;
   }
 
+  /** The conversations holding a message with this tag, among the messages of the last half hour. */
+  locate(tag: string): string[] {
+    const db = new DatabaseSync(DB_FILE, { readOnly: true });
+    try {
+      const rows = db.prepare(`SELECT session_id, content_json FROM messages WHERE role = 'user' AND created_timestamp > ? AND content_json LIKE ?`)
+        .all(Math.floor(Date.now() / 1000) - 1800, `%#${tag}]%`) as { session_id: string; content_json: string }[];
+      return [...new Set(rows.filter((r) => carriesTag(r.content_json, tag)).map((r) => r.session_id))];
+    } finally {
+      db.close();
+    }
+  }
+
+  /** The conversations whose last two minutes show a call of the AgentChat tool carrying the message `key` stands for. */
+  caller(key: string): string[] {
+    const db = new DatabaseSync(DB_FILE, { readOnly: true });
+    try {
+      const rows = db.prepare(`SELECT session_id, content_json FROM messages WHERE role = 'assistant' AND created_timestamp > ? AND content_json LIKE '%allinone%'`)
+        .all(Math.floor(Date.now() / 1000) - 120) as { session_id: string; content_json: string }[];
+      return [...new Set(rows.filter((r) => recordsCall(r.content_json, key)).map((r) => r.session_id))];
+    } finally {
+      db.close();
+    }
+  }
+
   /** Conversations as the desktop app lists them, by id. */
   private conversationIds(): string[] {
     const db = new DatabaseSync(DB_FILE, { readOnly: true });
@@ -301,17 +330,25 @@ export class GooseAdapter implements Adapter {
   // ---------- the Goose window ----------
 
   /**
-   * Types the message into the Goose window, waiting (and trying again every 15 s, for up to two hours) while that
-   * cannot be done right now. Messages for one conversation keep their order. Resolves false only when the window
-   * cannot show this conversation at all (Goose not open, or not in its sidebar): the caller then goes through goose acp.
+   * Types the message into the Goose window, waiting (and trying again every 15 s, for up to two hours) while its
+   * conversation still runs. The owner uses Goose as a worker and does not watch it: it goes in whether or not they
+   * are using the computer. Messages for one conversation keep their order. Resolves false when the window cannot show
+   * this conversation (Goose not open, not in its sidebar, or not opening): the caller then goes through goose acp.
    */
   private sendInWindow(threadId: string, title: string, text: string, requestId: string): Promise<boolean> {
     const previous = this.windowQueues.get(threadId) ?? Promise.resolve(true);
     const run = previous.catch(() => true).then(async () => {
       const deadline = Date.now() + WINDOW_WAIT_MS;
       let told = false;
+      let stuckSince = 0;
       for (;;) {
-        const ui = await this.desktop({ action: 'send', title, text, marks: this.marks(threadId) });
+        const ui = await this.desktop({ action: 'send', title, text, now: true, marks: this.marks(threadId) });
+        stuckSince = STUCK.has(ui.reason) ? stuckSince || Date.now() : 0;
+        if (stuckSince && Date.now() - stuckSince > STUCK_MS) {
+          log('goose', `window does not open ${title} (${ui.reason}); going through goose acp`);
+          activity(`Goose 窗口里打不开对话「${title}」，消息改从后台送进去（Goose 窗口重启后才看得到这条）`);
+          return false;
+        }
         if (ui.ok) {
           this.sink.receipt(requestId, 'accepted', `run:${threadId}`);
           return true;
@@ -509,9 +546,24 @@ export class GooseAdapter implements Adapter {
     let db: DatabaseSync | null = null;
     try {
       db = new DatabaseSync(DB_FILE, { readOnly: true });
-      const rows = db.prepare('SELECT id, message_id, role, content_json, created_timestamp, metadata_json FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?')
-        .all(threadId, limit) as unknown as MessageRow[];
-      return use(rows.reverse());
+      const page = db.prepare('SELECT id, message_id, role, content_json, created_timestamp, metadata_json FROM messages WHERE session_id = ? AND id < ? ORDER BY id DESC LIMIT ?');
+      const rows = (page.all(threadId, Number.MAX_SAFE_INTEGER, limit) as unknown as MessageRow[]).reverse();
+      // A long turn (many tool calls) can begin before the rows read: without its typed message the turn has no
+      // name, and its end and files are never reported. Look further back for that message and start with it.
+      if (rows.length === limit && !opensTurn(rows[0]!)) {
+        let before = rows[0]!.id;
+        for (let pages = 0; pages < 50; pages++) {
+          const older = page.all(threadId, before, 400) as unknown as MessageRow[];
+          const start = older.find(opensTurn);
+          if (start) {
+            rows.unshift(start);
+            break;
+          }
+          if (older.length < 400) break;
+          before = older[older.length - 1]!.id;
+        }
+      }
+      return use(rows);
     } catch (error) {
       log('goose', `reading ${threadId} failed: ${(error as Error).message}`);
       return null;

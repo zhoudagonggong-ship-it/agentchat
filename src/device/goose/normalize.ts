@@ -28,6 +28,13 @@ function parse<T>(raw: string | null): T | null {
   }
 }
 
+/** Whether a row is a message typed to the agent: the start of a turn. */
+export function opensTurn(row: MessageRow): boolean {
+  if (row.role !== 'user' || parse<{ userVisible?: boolean }>(row.metadata_json)?.userVisible === false) return false;
+  const content = parse<any[]>(row.content_json) ?? [];
+  return !content.some((c) => c?.type === 'toolResponse') && content.some((c) => c?.type === 'text' && String(c.text ?? ''));
+}
+
 export interface Normalized {
   items: Item[];
   files: OutputFile[];

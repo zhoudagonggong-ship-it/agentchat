@@ -52,6 +52,7 @@ const TOOLS = [
         to: { type: 'string', description: '或者：「电脑 · Agent」' },
         conversation: { type: 'string', description: '和对话标题' },
         count: { type: 'number', description: '看最近几条（默认 10，最多 50）' },
+        full: { type: 'boolean', description: '消息原文完整给出，不截断（汇报太长被省略时用；配合 count: 1 只看最后一条）' },
       },
     },
   },

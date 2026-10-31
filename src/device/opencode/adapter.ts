@@ -8,9 +8,9 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Adapter, AdapterSink } from '../device.ts';
 import type { AgentInfo, Command, Item, ProjectInfo, SessionInfo } from '../../shared/protocol.ts';
-import { withAttachments } from '../../shared/protocol.ts';
+import { carriesTag, recordsCall, withAttachments } from '../../shared/protocol.ts';
 import { debounce, log } from '../../shared/util.ts';
-import { normalizeMessages, textItemId, type OutputFile } from './normalize.ts';
+import { normalizeMessages, textItemId, type OutputFile, type Run } from './normalize.ts';
 import { TOOL_NAME, installHint, toolCommand } from '../tool.ts';
 
 const HYDRATE_MESSAGES = 200;
@@ -92,6 +92,7 @@ export class OpenCodeAdapter implements Adapter {
   private server: Server | null = null;
   private readonly known = new Map<string, SessionInfo>();
   private readonly hydrated = new Set<string>();
+  private readonly runs = new Map<string, Run>(); // the run each conversation's last read ended in
   private readonly active = new Set<string>();
   private readonly turns = new Map<string, string>(); // session -> current turn (its latest user message)
   private readonly previews = new Map<string, string>();
@@ -103,7 +104,7 @@ export class OpenCodeAdapter implements Adapter {
   private relistNeeded = false;
   private refreshing = false;
   private refreshAgain = false;
-  private readonly scheduleRefresh = debounce(() => void this.refresh(), 500);
+  private readonly scheduleRefresh = debounce(() => void this.refresh(), 500, 2000); // read even while a run writes on
 
   async start(sink: AdapterSink): Promise<void> {
     this.sink = sink;
@@ -383,12 +384,38 @@ export class OpenCodeAdapter implements Adapter {
     return [...this.projects.entries()].filter(([id]) => used.has(id)).sort((a, b) => b[1].at - a[1].at).map(([id, p]) => ({ id, name: p.name }));
   }
 
+  /** The conversations holding a message with this tag, among those active in the last half hour (their latest messages). */
+  async locate(tag: string): Promise<string[]> {
+    const since = Date.now() / 1000 - 1800;
+    const recent = [...this.known.values()].filter((s) => s.updatedAt >= since || s.running);
+    const found = await Promise.all(recent.map(async (s) => {
+      const res = await this.api<{ data: any[] }>('GET', `/api/session/${encodeURIComponent(s.threadId)}/message?limit=40&order=desc`).catch(() => ({ data: [] }));
+      return res.data.some((m) => m?.type === 'user' && carriesTag(String(m.text ?? m.payload?.text ?? ''), tag)) ? s.threadId : null;
+    }));
+    return found.filter((t): t is string => t !== null);
+  }
+
+  /**
+   * The conversations whose latest messages show a call of the AgentChat tool carrying the message `key` stands for
+   * (as a tool of its own, or in code OpenCode runs): OpenCode does not tell its tools which conversation calls.
+   */
+  async caller(key: string): Promise<string[]> {
+    const since = Date.now() / 1000 - 120;
+    const recent = [...this.known.values()].filter((s) => s.updatedAt >= since || s.running);
+    const found = await Promise.all(recent.map(async (s) => {
+      const res = await this.api<{ data: any[] }>('GET', `/api/session/${encodeURIComponent(s.threadId)}/message?limit=10&order=desc`).catch(() => ({ data: [] }));
+      return res.data.some((m) => m?.type === 'assistant' && recordsCall(JSON.stringify(m.content ?? ''), key)) ? s.threadId : null;
+    }));
+    return found.filter((t): t is string => t !== null);
+  }
+
   /** Reads the latest messages; updates the turn and latest line and, for hydrated conversations, reports items. */
   private async readThread(threadId: string, limit: number): Promise<void> {
     const full = this.hydrated.has(threadId);
     const res = await this.api<{ data: any[] }>('GET', `/api/session/${encodeURIComponent(threadId)}/message?limit=${full ? limit : PREVIEW_MESSAGES}&order=desc`);
-    const { items, files, turnId, preview } = normalizeMessages(res.data.slice().reverse(), this.clientIds);
+    const { items, files, turnId, run, preview } = normalizeMessages(res.data.slice().reverse(), this.clientIds, this.runs.get(threadId));
     if (turnId) this.turns.set(threadId, turnId);
+    if (run) this.runs.set(threadId, run);
     const line = shorten(preview);
     if (line) this.previews.set(threadId, line);
     if (!full) return;

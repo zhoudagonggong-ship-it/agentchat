@@ -10,6 +10,8 @@ export interface Transport {
   /** Set by the device before `start()`. */
   handlers: { message(msg: HubToDevice): void; connected(): void; disconnected(reason?: string): void };
   start(): void;
+  /** Ends it for good (the device moved on to another hub). */
+  stop(): void;
   readonly connected: boolean;
 }
 
@@ -47,7 +49,17 @@ export class WsTransport implements Transport {
     if (this.connected) this.ws!.send(JSON.stringify(msg));
   }
 
+  private stopped = false;
+  stop(): void {
+    this.stopped = true;
+    if (this.watchdog) clearInterval(this.watchdog);
+    const ws = this.ws;
+    this.ws = null;
+    ws?.close();
+  }
+
   private open(): void {
+    if (this.stopped) return;
     const ws = new WebSocket(this.url);
     this.ws = ws;
     ws.onopen = () => {
@@ -61,11 +73,13 @@ export class WsTransport implements Transport {
       const msg = parseJson<HubToDevice>(String(event.data));
       if (msg) this.handlers.message(msg);
     };
-    let opened = false;
-    ws.addEventListener('open', () => (opened = true));
-    ws.onclose = async () => {
+    let opened = 0;
+    ws.addEventListener('open', () => (opened = Date.now()));
+    ws.onclose = async (event: CloseEvent) => {
       if (this.ws !== ws) return;
       this.ws = null;
+      // Why a working connection ended, to tell a hub that dropped us from a network that did (see the hub's log too).
+      if (opened) log('link', `connection closed after ${Math.round((Date.now() - opened) / 1000)} s (code ${event.code}${event.reason ? `, ${event.reason}` : ''}, heard from the hub ${Math.round((Date.now() - this.lastHeard) / 1000)} s ago)`);
       // Never got through: find out why (the WebSocket error itself carries no detail).
       const reason = opened ? '' : await diagnose(this.url);
       if (reason !== this.lastReason && reason) log('link', `cannot reach the hub: ${reason}`); // once per cause, not every retry
@@ -116,12 +130,16 @@ export class LocalTransport implements Transport {
     queueMicrotask(() => this.handlers.connected());
   }
 
+  stop(): void {
+    this.connected = false;
+  }
+
   send(msg: DeviceToHub): void {
     // Copy through JSON so both sides never share mutable objects, exactly like the wire.
-    queueMicrotask(() => this.toHub(JSON.parse(JSON.stringify(msg)) as DeviceToHub));
+    if (this.connected) queueMicrotask(() => this.toHub(JSON.parse(JSON.stringify(msg)) as DeviceToHub));
   }
 
   deliver(msg: HubToDevice): void {
-    queueMicrotask(() => this.handlers.message(JSON.parse(JSON.stringify(msg)) as HubToDevice));
+    if (this.connected) queueMicrotask(() => this.handlers.message(JSON.parse(JSON.stringify(msg)) as HubToDevice));
   }
 }

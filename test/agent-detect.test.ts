@@ -14,6 +14,34 @@ const fakeAdapter = (id: string, started: string[]): Adapter => ({
   command: async () => {},
 });
 
+test('a message left waiting for its window when the program stopped is taken up again; others run once', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dev-'));
+  const runs: string[] = [];
+  const open = async (waiting: boolean) => {
+    const transport = { handlers: null as any, start() {}, send() {} };
+    const device = new Device(dir, 'd1', 'pc', 'secret', transport as any);
+    const sink: any[] = [];
+    device.add({ info: { id: 'claude-code', kind: 'claude-code', label: 'Claude' }, start: async (s: any) => void sink.push(s), hydrate() {},
+      command: async (_t: string, c: any) => { runs.push(c.requestId); if (waiting) sink[0].receipt(c.requestId, 'pending', undefined, 'waiting_for_window'); } } as any);
+    await device.start();
+    transport.handlers.message({ t: 'welcome' } satisfies HubToDevice);
+    return transport;
+  };
+  const cmd = (requestId: string) => ({ t: 'command', agentId: 'claude-code', threadId: 't', command: { requestId, op: 'send', text: 'x' } }) as HubToDevice;
+  let link = await open(true);
+  link.handlers.message(cmd('r1'));
+  await new Promise((r) => setTimeout(r, 20));
+  link.handlers.message(cmd('r1')); // the hub sends it again: this run is still at it
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(runs, ['r1']);
+  link = await open(false); // the program restarted: the wait went with it
+  link.handlers.message(cmd('r1'));
+  await new Promise((r) => setTimeout(r, 20));
+  link.handlers.message(cmd('r1'));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(runs, ['r1', 'r1']);
+});
+
 test('an agent found while running starts at once and the hub hears of it', async () => {
   const sent: DeviceToHub[] = [];
   const transport = { handlers: null as any, start() {}, send: (m: DeviceToHub) => void sent.push(m) };

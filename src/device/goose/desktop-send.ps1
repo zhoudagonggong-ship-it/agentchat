@@ -46,7 +46,7 @@ public static bool Restore(IntPtr h) {
   # Filling the prompt box brings Goose to the front for a moment: never while the owner is at the keyboard,
   # where their next keys would land in Goose. Stopping only presses a button and may go ahead.
   $minIdle = if ($null -ne $req.minIdleMs) { [int]$req.minIdleMs } else { 30000 }
-  if ($req.action -in 'send', 'new' -and [AllinOne.Input]::IdleMs() -lt $minIdle) { Done $false 'in_use' }
+  if ($req.action -in 'send', 'new' -and -not $req.now -and [AllinOne.Input]::IdleMs() -lt $minIdle) { Done $false 'in_use' }
   $previous = [AllinOne.Input]::GetForegroundWindow()
   # Goose may come to the front while we work in it: give the front back to whatever the owner had there.
   function Finish([bool]$ok, [string]$reason) {

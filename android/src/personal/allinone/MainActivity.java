@@ -3,7 +3,9 @@ package personal.allinone;
 import android.Manifest;
 import android.app.Activity;
 import android.content.ClipData;
+import android.content.ContentValues;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
@@ -14,8 +16,11 @@ import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.PowerManager;
+import android.provider.MediaStore;
 import android.provider.Settings;
+import android.view.View;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
@@ -33,6 +38,7 @@ import android.widget.Toast;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import org.json.JSONObject;
@@ -78,6 +84,31 @@ public class MainActivity extends Activity {
           cameraRequest = request;
           requestPermissions(new String[] {Manifest.permission.CAMERA}, REQ_CAMERA);
         }
+      }
+
+      /** A video's full-screen button: the player covers everything, and turning the phone turns it. */
+      private View fullscreen;
+
+      @Override
+      public void onShowCustomView(View view, CustomViewCallback callback) {
+        if (fullscreen != null) {
+          callback.onCustomViewHidden();
+          return;
+        }
+        fullscreen = view;
+        view.setBackgroundColor(Color.BLACK);
+        root.addView(view, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        getWindow().getInsetsController().hide(WindowInsets.Type.systemBars());
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR);
+      }
+
+      @Override
+      public void onHideCustomView() {
+        if (fullscreen == null) return;
+        root.removeView(fullscreen);
+        fullscreen = null;
+        getWindow().getInsetsController().show(WindowInsets.Type.systemBars());
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
       }
 
       /** The composer's + button: the system picker (gallery, files, camera apps), several at once. */
@@ -282,24 +313,109 @@ public class MainActivity extends Activity {
 
   // ---------- files the WebView cannot show ----------
 
-  private void openFile(String url, String name, String mime) {
+  /** A file of the hub's, downloaded into the app's cache (only the hub's own files: the page names them). */
+  private File fetch(String url, String name) throws Exception {
+    File dir = new File(getCacheDir(), "files");
+    dir.mkdirs();
+    File file = new File(dir, safeName(name));
+    HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+    conn.setConnectTimeout(8000);
+    conn.setReadTimeout(60000);
+    try (InputStream in = conn.getInputStream(); FileOutputStream out = new FileOutputStream(file)) {
+      byte[] buf = new byte[65536];
+      for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+    } finally {
+      conn.disconnect();
+    }
+    return file;
+  }
+
+  private static String safeName(String name) {
+    String n = name.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
+    return n.isEmpty() ? "file" : n;
+  }
+
+  private boolean fromHub(String url) {
     String hub = Hubs.hubUrl(this);
-    if (hub == null || !url.startsWith(hub)) return; // only the hub's own files
-    toast("正在打开 " + name);
+    return hub != null && url.startsWith(hub);
+  }
+
+  /** Into the phone's own collections, where the gallery and other apps find it: pictures, videos, music, else downloads. */
+  private void saveFile(String url, String name, String mime) {
+    if (!fromHub(url)) return;
+    toast("正在保存 " + name);
     new Thread(() -> {
       try {
-        File dir = new File(getCacheDir(), "files");
-        dir.mkdirs();
-        File file = new File(dir, name.replaceAll("[\\\\/:*?\"<>|]", "_"));
+        Uri collection;
+        String folder;
+        if (mime.startsWith("image/")) {
+          collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+          folder = Environment.DIRECTORY_PICTURES;
+        } else if (mime.startsWith("video/")) {
+          collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+          folder = Environment.DIRECTORY_MOVIES;
+        } else if (mime.startsWith("audio/")) {
+          collection = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+          folder = Environment.DIRECTORY_MUSIC;
+        } else {
+          collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
+          folder = Environment.DIRECTORY_DOWNLOADS;
+        }
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.MediaColumns.DISPLAY_NAME, safeName(name));
+        values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+        values.put(MediaStore.MediaColumns.RELATIVE_PATH, folder + "/AgentChat");
+        values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+        Uri item = getContentResolver().insert(collection, values);
+        if (item == null) throw new Exception("系统不让保存");
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setConnectTimeout(8000);
         conn.setReadTimeout(60000);
-        try (InputStream in = conn.getInputStream(); FileOutputStream out = new FileOutputStream(file)) {
+        try (InputStream in = conn.getInputStream(); OutputStream out = getContentResolver().openOutputStream(item)) {
           byte[] buf = new byte[65536];
           for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+        } catch (Exception e) {
+          getContentResolver().delete(item, null, null);
+          throw e;
         } finally {
           conn.disconnect();
         }
+        values.clear();
+        values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+        getContentResolver().update(item, values, null, null);
+        String where = mime.startsWith("image/") ? "相册" : mime.startsWith("video/") ? "相册的视频" : mime.startsWith("audio/") ? "音乐" : "下载";
+        runOnUiThread(() -> toast("已保存到" + where + "（AgentChat 文件夹）"));
+      } catch (Exception e) {
+        runOnUiThread(() -> toast("保存失败：" + e.getMessage()));
+      }
+    }).start();
+  }
+
+  /** To another app (WeChat, a photo editor…), through the system's share sheet. */
+  private void shareFile(String url, String name, String mime) {
+    if (!fromHub(url)) return;
+    new Thread(() -> {
+      try {
+        File file = fetch(url, name);
+        runOnUiThread(() -> {
+          Uri uri = FilesProvider.uriFor(file);
+          Intent send = new Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri)
+              .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+          send.setClipData(ClipData.newRawUri(name, uri));
+          startActivity(Intent.createChooser(send, "分享 " + name));
+        });
+      } catch (Exception e) {
+        runOnUiThread(() -> toast("分享失败：" + e.getMessage()));
+      }
+    }).start();
+  }
+
+  private void openFile(String url, String name, String mime) {
+    if (!fromHub(url)) return; // only the hub's own files
+    toast("正在打开 " + name);
+    new Thread(() -> {
+      try {
+        File file = fetch(url, name);
         runOnUiThread(() -> {
           if ("application/pdf".equals(mime)) {
             startActivity(new Intent(this, PdfActivity.class).putExtra("path", file.getAbsolutePath()).putExtra("title", name));
@@ -331,6 +447,16 @@ public class MainActivity extends Activity {
   private final class Bridge {
     @JavascriptInterface public void openFile(String url, String name, String mime) {
       runOnUiThread(() -> MainActivity.this.openFile(url, name, mime));
+    }
+    @JavascriptInterface public void saveFile(String url, String name, String mime) {
+      runOnUiThread(() -> MainActivity.this.saveFile(url, name, mime));
+    }
+    @JavascriptInterface public void shareFile(String url, String name, String mime) {
+      runOnUiThread(() -> MainActivity.this.shareFile(url, name, mime));
+    }
+    /** A picture is open full screen: turning the phone turns it, even with the screen's rotation locked. */
+    @JavascriptInterface public void viewerOpen(boolean open) {
+      runOnUiThread(() -> setRequestedOrientation(open ? ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR : ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED));
     }
     @JavascriptInterface public void retry() {
       runOnUiThread(() -> loadHub(null));

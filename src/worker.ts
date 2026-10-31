@@ -9,6 +9,7 @@ import { createInterface } from 'node:readline';
 import { format, promisify } from 'node:util';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { APP_DIR, DATA_DIR, FIRST_RUN, IN_TEST, loadConfig, saveConfig, type Config } from './config.ts';
+import { Voice } from './device/voice/voice.ts';
 import { CLI as TAILSCALE, tailnetStatus, tailscaleLoginUrl, tailscaleProblem, tailscaleUp, type TailnetStatus, type TailscaleStep } from './tailscale.ts';
 import { Hub } from './hub/hub.ts';
 import { Device } from './device/device.ts';
@@ -20,22 +21,28 @@ import { DshAdapter, hasDsh } from './device/dsh/adapter.ts';
 import { homedir, hostname } from 'node:os';
 import { WsTransport, type Transport } from './link.ts';
 import { activity, onActivity, recentActivity } from './activity.ts';
+import { heldOutput, sendNow } from './device/held.ts';
 import type { AskOp, HubRef, MemberSeed } from './shared/protocol.ts';
 import { CONTROL_PORT, HUB_LOCAL_PORT, HUB_PORT } from './shared/protocol.ts';
 import { debounce, log } from './shared/util.ts';
 import { applyPackage, codeVersion, confirmUpdate, isDevCheckout, wasRejected } from './update.ts';
 import { downloadRelease, latestRelease, type Release } from './release.ts';
 import { exportDiagnostics } from './diagnostics.ts';
+import { takeOver } from './handover.ts';
+import { ReplicaSink } from './device/replica.ts';
+import { decide, outranks, probe } from './shift.ts';
 
 export const RESTART_CODE = 75;
 const CONTROL_DIR = join(APP_DIR, 'web-control');
 const SEED_FILE = join(DATA_DIR, 'hub-seed.json');
 const HANDOVER_FILE = join(DATA_DIR, 'handover-in.zip');
-const HANDOVER_STALL_MS = 60_000;
 const DETECT_EVERY_TICKS = 4; // about every 2 minutes
 const RELEASE_EVERY_TICKS = 2880; // a day
 const RELEASE_FIRST_TICK = 10; // five minutes after starting
 const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+const SHIFT_EVERY_MS = 15_000; // a computer without its hub looks around this often
+const RIVAL_EVERY_MS = 60_000; // the hub looks for another one acting as hub this often
+const LEAVE_MAX_MS = 25_000; // shutting down: at most this long to hand the duty on
 const run = promisify(execFile);
 const LOG_MAX = 5 * 1024 * 1024;
 const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
@@ -59,12 +66,18 @@ export class Worker {
   private autostart = false;
   private readonly controls = new Set<WebSocket>();
   private readonly underTray = process.env.ALLINONE_TRAY === '1';
+  /** This computer's copy of the hub's record (while it is not the hub itself). */
+  private replica: ReplicaSink | null = null;
+  /** Since when the hub has been out of reach (0: connected). */
+  private lostSince = 0;
+  private lookingAround = false;
 
   async start(): Promise<void> {
     if (this.underTray) this.redirectLogs();
     // The window and tray first: until Tailscale is ready they guide the owner through it.
     this.startControlServer();
     this.listenToTray();
+    this.leaveOnSignals();
     onActivity(() => this.changed());
     this.autostart = await this.autostartEnabled();
     // Started for the first time without the installer (which turns it on itself): starting with Windows is the default.
@@ -73,6 +86,16 @@ export class Worker {
     this.peers = this.tailnet.devices.map((d) => ({ ...d, isHub: this.config.hub?.stableId === d.stableId }));
 
     const self = this.tailnet.self;
+    // Hub when this computer stopped: while it was away (a power cut), another one may have taken over.
+    if (!this.config.paused && this.config.hub?.stableId === self.stableId) {
+      const rival = await this.findRival();
+      if (rival) {
+        activity(`本机离开期间「${rival.name}」接了主电脑的班，本机改为普通成员`);
+        await run(TAILSCALE, ['serve', `--https=${HUB_PORT}`, 'off'], { windowsHide: true }).catch(() => {});
+        this.config = { ...this.config, hub: rival.ref, term: rival.term };
+        saveConfig(this.config);
+      }
+    }
     if (this.config.paused) {
       this.role = 'paused';
       activity('已暂停');
@@ -86,8 +109,176 @@ export class Worker {
     } else {
       this.startDevice(new WsTransport(`wss://${this.config.hub.dnsName}:${HUB_PORT}/ws/device`));
       this.role = 'device';
+      this.keepReplica();
     }
+    setInterval(() => void this.keepShift(), SHIFT_EVERY_MS);
     this.changed();
+  }
+
+  // ---------- shifts (shift.ts) ----------
+
+  /** Another computer acting as hub, on a later term (or the same, earlier in line): the one to stay. */
+  private async findRival(): Promise<{ ref: HubRef; term: number } | null> {
+    const self = this.tailnet.self.stableId;
+    const line = this.config.line ?? [];
+    const term = this.hub?.term ?? this.config.term ?? 1;
+    const answers = await Promise.all(line.filter((r) => r.stableId !== self).map(async (ref) => ({ ref, p: await probe(ref.dnsName) })));
+    const found = answers.filter((a) => a.p && outranks(a.p, self, term, line.map((r) => r.stableId)))
+      .sort((a, b) => b.p!.term - a.p!.term)[0];
+    return found ? { ref: found.ref, term: found.p!.term } : null;
+  }
+
+  /** A copy of the hub's record kept here, so this computer can take over. */
+  private keepReplica(): void {
+    const device = this.device!;
+    rmSync(join(DATA_DIR, 'replica-out.sqlite'), { force: true }); // the copy this computer made for others while hub
+    const replica = new ReplicaSink(DATA_DIR);
+    this.replica = replica;
+    replica.send = (epoch, n) => device.tell({ t: 'replicaAt', epoch, n });
+    replica.hub = () => (this.config.hub ? `https://${this.config.hub.dnsName}:${HUB_PORT}/` : '');
+    device.onReplica = (msg) => {
+      if (msg.t === 'replica') replica.changesets(msg.epoch, msg.n, msg.data.map((d) => Buffer.from(d, 'base64')));
+      else void replica.snapshot(msg.epoch, msg.n, msg.url);
+    };
+  }
+
+  private shiftWorking = false;
+  /**
+   * Every SHIFT_EVERY_MS. A computer: without its hub for a while, look around (follow a hub that is there, or take
+   * over when it is our turn). The hub: give way to a rival; hand the duty back to a computer before us in line that
+   * is back; remember the line, for after a restart.
+   */
+  private async keepShift(): Promise<void> {
+    if (this.shiftWorking) return;
+    this.shiftWorking = true;
+    try {
+      if (this.role === 'device') await this.lookAround();
+      if (this.role === 'hub' && this.hub) await this.checkDuty();
+    } catch (e) {
+      log('shift', `looking around failed: ${(e as Error).message}`);
+    } finally {
+      this.shiftWorking = false;
+    }
+  }
+
+  private async lookAround(): Promise<void> {
+    if (this.device?.status !== 'connecting') {
+      this.lostSince = 0;
+      return;
+    }
+    this.lostSince ||= Date.now();
+    const lostFor = Date.now() - this.lostSince;
+    const hub = this.config.hub;
+    const line = this.config.line ?? [];
+    if (lostFor < SHIFT_EVERY_MS || !hub || !line.length) return;
+    const self = this.tailnet.self.stableId;
+    this.tailnet = await tailnetStatus();
+    const online = new Set(this.tailnet.devices.filter((d) => d.online).map((d) => d.stableId));
+    const others = line.some((r) => r.stableId === hub.stableId) ? line : [...line, hub];
+    const probes = new Map(await Promise.all(others.filter((r) => r.stableId !== self).map(async (r) => [r.stableId, await probe(r.dnsName)] as const)));
+    const verdict = decide({ self, hub: hub.stableId, term: this.config.term ?? 1, line: line.map((r) => r.stableId), lostFor, online,
+      probes, ready: this.replica?.ready ?? false });
+    if (verdict.do === 'follow') {
+      const ref = others.find((r) => r.stableId === verdict.id)!;
+      activity(`主电脑「${hub.name}」失联，转到「${ref.name}」`, 'warn');
+      this.follow(ref, verdict.term);
+    } else if (verdict.do === 'takeOver') {
+      activity(`主电脑「${hub.name}」失联 ${Math.round(lostFor / 1000)} 秒，本机按顺序接班`, 'warn');
+      await this.promote(verdict.term);
+    }
+  }
+
+  private async checkDuty(): Promise<void> {
+    const hub = this.hub!;
+    const line = hub.line();
+    if (JSON.stringify(line) !== JSON.stringify(this.config.line) || this.config.term !== hub.term) {
+      this.config = { ...this.config, line, term: hub.term };
+      saveConfig(this.config);
+    }
+    if (Date.now() - this.rivalAt >= RIVAL_EVERY_MS) {
+      this.rivalAt = Date.now();
+      const rival = await this.findRival();
+      if (rival) {
+        activity(`「${rival.ref.name}」也在当主电脑（第 ${rival.term} 班，本机第 ${hub.term} 班），本机让出`, 'warn');
+        return this.giveWay(rival.ref, rival.term);
+      }
+    }
+    // The duty goes back where it belongs, when that cuts nothing off here.
+    const back = hub.reclaimTarget();
+    if (back && this.device?.busy()) {
+      if (!this.reclaimWaitSaid) log('shift', `${back.name} could take the duty back, but work here is under way`);
+      this.reclaimWaitSaid = true;
+    } else this.reclaimWaitSaid = false;
+    if (back && !this.device?.busy()) {
+      activity(`「${back.name}」排在本机前面，已回来，把主电脑的工作交还给它`);
+      if (await this.handOff(back.stableId)) this.restart();
+    }
+  }
+  private rivalAt = 0;
+  private reclaimWaitSaid = false;
+
+  /** Steps down for a hub found acting as such: this computer's own record gives way to the other one's. */
+  private async giveWay(ref: HubRef, term: number): Promise<void> {
+    await run(TAILSCALE, ['serve', `--https=${HUB_PORT}`, 'off'], { windowsHide: true }).catch(() => {});
+    this.config = { ...this.config, hub: ref, term };
+    saveConfig(this.config);
+    this.restart();
+  }
+
+  /** Over to another hub, without stopping the agents here. */
+  private follow(hub: HubRef, term?: number): void {
+    this.config = { ...this.config, hub, ...(term ? { term } : {}) };
+    saveConfig(this.config);
+    this.lostSince = 0;
+    this.device?.relink(new WsTransport(`wss://${hub.dnsName}:${HUB_PORT}/ws/device`));
+    this.changed();
+  }
+
+  /** This computer takes over as hub from its copy of the record, on `term`; the agents here carry on meanwhile. */
+  private async promote(term: number): Promise<void> {
+    if (this.role !== 'device' || !this.device) return;
+    const self = this.tailnet.self;
+    const had = this.replica?.promote(DATA_DIR) ?? false;
+    this.replica = null;
+    this.device.onReplica = () => {};
+    if (!had) activity('本机没有主电脑记录的副本，用本机原有的记录接班', 'warn');
+    this.config = { ...this.config, hub: { stableId: self.stableId, dnsName: self.dnsName, name: self.name }, term };
+    saveConfig(this.config);
+    await this.startHub(term);
+    this.role = 'hub';
+    this.device.relink(this.hub!.connectLocalDevice());
+    activity(`本机已接班当主电脑（第 ${term} 班）`);
+    this.changed();
+  }
+
+  /** Hands the hub's duty on to the next in line (or `to`); false when no computer could take it. */
+  private async handOff(to?: string): Promise<boolean> {
+    if (this.role !== 'hub' || !this.hub) return false;
+    const next = await this.hub.stepDown(to).catch((e: Error) => (log('shift', `handing over failed: ${e.message}`), null));
+    if (!next) return false;
+    await run(TAILSCALE, ['serve', `--https=${HUB_PORT}`, 'off'], { windowsHide: true }).catch(() => {});
+    this.config = { ...this.config, hub: next, term: this.hub.term + 1 };
+    saveConfig(this.config);
+    return true;
+  }
+
+  /** Going away (shutting down, quitting, updating): the hub hands its duty on first, as far as time allows. */
+  private async leave(why: string): Promise<void> {
+    if (this.role !== 'hub') return;
+    activity(`${why}：先把主电脑的工作交给下一台`);
+    const done = await Promise.race([this.handOff(), new Promise<boolean>((r) => setTimeout(() => r(false), LEAVE_MAX_MS))]);
+    if (!done) activity('没能交出主电脑的工作（没有能接班的电脑，或时间不够）；它不在时，其他电脑会按顺序接班', 'warn');
+  }
+
+  private leaveOnSignals(): void {
+    let leaving = false;
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP'] as const) {
+      process.on(signal, () => {
+        if (leaving) return;
+        leaving = true;
+        void this.leave('程序被关闭').finally(() => process.exit(0));
+      });
+    }
   }
 
   // ---------- Tailscale ----------
@@ -157,7 +348,8 @@ export class Worker {
 
   // ---------- roles ----------
 
-  private async startHub(): Promise<void> {
+  /** `term`: taking over from this computer's copy of the record, as that term. */
+  private async startHub(term?: number): Promise<void> {
     const self = this.tailnet.self;
     let seeds: MemberSeed[] = [];
     if (existsSync(SEED_FILE)) {
@@ -165,7 +357,7 @@ export class Worker {
       rmSync(SEED_FILE);
     }
     if (existsSync(HANDOVER_FILE)) await this.takeHandover();
-    this.hub = new Hub(DATA_DIR, self.stableId, self.name, self.dnsName, this.tailnet.ownerLogin, seeds);
+    this.hub = new Hub(DATA_DIR, self.stableId, self.name, self.dnsName, this.tailnet.ownerLogin, seeds, term);
     this.hub.onChange = () => this.changed();
     this.hub.onInstallUpdate = () => void this.installRelease();
     this.hub.start();
@@ -204,13 +396,28 @@ export class Worker {
       if (device.status === 'pending') activity('已向主电脑发出加入请求，等待允许', 'warn');
       this.changed();
     };
-    device.onHubMoved = (hub, members, handover) => void this.followHub(hub, members, handover);
+    device.onHubMoved = (msg) => {
+      if (this.role === 'hub') return; // our own hub handing on: the program around it sees to this computer
+      if (msg.promote && msg.hub.stableId === self.stableId) {
+        activity('主电脑把工作交给本机');
+        void this.promote(msg.term ?? (this.config.term ?? 1) + 1);
+      } else if (msg.hub.stableId !== self.stableId) {
+        activity(`主电脑换到「${msg.hub.name}」`);
+        this.follow(msg.hub, msg.term);
+      } else void this.followHub(msg.hub, msg.members, msg.handover);
+    };
+    device.onShift = (msg) => {
+      if (this.role === 'hub' || (msg.term === this.config.term && JSON.stringify(msg.line) === JSON.stringify(this.config.line))) return;
+      this.config = { ...this.config, term: msg.term, line: msg.line };
+      saveConfig(this.config);
+    };
     // Self-update from the hub; a development checkout (with .git) keeps its own code.
     if (this.role !== 'hub' && this.config.hub?.stableId !== self.stableId) {
       if (isDevCheckout()) log('update', 'development checkout: not taking updates from the hub');
       else device.code = codeVersion();
     }
     device.onJoined = () => {
+      this.replica?.joined();
       this.detectAgents();
       const version = confirmUpdate();
       if (version) activity(`已更新到新版本（${version.slice(0, 8)}）`);
@@ -220,6 +427,20 @@ export class Worker {
     device.onAlert = (alert) => {
       if (this.underTray) process.stdout.write('@@alert ' + JSON.stringify(alert) + '\n');
     };
+    // Voice input (Win+Alt+Space): a helper of its own in the owner's desktop session; the hub decides who listens.
+    if (this.underTray && !IN_TEST) {
+      const voice = new Voice();
+      voice.onMessage = (m) => device.voice(m);
+      device.onVoice = (m) => voice.toHelper(m);
+      voice.start();
+    }
+    // Messages held back from an agent's window while the owner works: told in the same bubble (a click sends it in),
+    // counted in the tray's menu.
+    heldOutput((r) => {
+      if (this.underTray) process.stdout.write('@@alert ' + JSON.stringify(r) + '\n');
+    }, (count) => {
+      if (this.underTray) process.stdout.write(`@@held ${count}\n`);
+    });
     this.detectAgents();
     if (!device.agents.length) activity('本机没有找到 Codex、Claude Code、OpenCode、Goose 或 DSH');
     // An agent installed (or first opened) later is picked up without a restart: no timer of its own, it rides on
@@ -258,20 +479,14 @@ export class Worker {
     const toUs = hub.stableId === this.tailnet.self.stableId;
     if (toUs && handover) {
       activity('本机将成为主电脑，正在取回旧主电脑的数据');
-      let error: Error | null = null;
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          await download(handover, HANDOVER_FILE);
-          error = null;
-          activity('已取回旧主电脑的数据');
-          break;
-        } catch (e) {
-          error = e as Error;
-          log('handover', `download attempt ${attempt} failed: ${error.message}`);
-          rmSync(HANDOVER_FILE, { force: true });
-        }
+      rmSync(HANDOVER_FILE, { force: true }); // what an earlier handover left is not this one's
+      try {
+        await takeOver(handover, HANDOVER_FILE);
+        activity('已取回旧主电脑的数据');
+      } catch (e) {
+        rmSync(HANDOVER_FILE, { force: true });
+        activity(`没能取回旧主电脑的数据（${(e as Error).message}），只带上成员名单；旧主电脑上的数据还在，可以再换一次`, 'warn');
       }
-      if (error) activity(`没能取回旧主电脑的数据（${error.message}），只带上成员名单`, 'warn');
     }
     if (members && toUs) writeFileSync(SEED_FILE, JSON.stringify(members));
     this.config = { ...this.config, hub };
@@ -298,6 +513,7 @@ export class Worker {
     try {
       const code = await applyPackage(version, data);
       log('update', `updated to ${version}; restarting`);
+      await this.leave('更新程序');
       setTimeout(() => process.exit(code), 300);
     } catch (error) {
       this.updating = false;
@@ -323,6 +539,7 @@ export class Worker {
     try {
       const code = await applyPackage(null, await downloadRelease(this.release));
       log('update', `release ${this.release.version} installed; restarting`);
+      await this.leave('更新程序');
       setTimeout(() => process.exit(code), 300);
     } catch (error) {
       this.updating = false;
@@ -384,8 +601,10 @@ export class Worker {
     if (!peer) throw new Error('没有这台电脑');
     const ref: HubRef = { stableId: peer.stableId, dnsName: peer.dnsName, name: peer.name };
     if (this.config.hub?.stableId === stableId) return;
-    // Handing over from the current hub: the new one takes the data, everyone follows, then this one steps down.
+    // Handing over from the current hub: from the new one's copy of the record when it is current (see shift.ts), else
+    // the new one takes the data as a whole first; everyone follows, then this one steps down.
     if (this.hub && this.role === 'hub') {
+      if (await this.handOff(stableId)) return this.restart();
       await this.hub.moveTo(ref);
       await run(TAILSCALE, ['serve', `--https=${HUB_PORT}`, 'off'], { windowsHide: true }).catch(() => {});
     }
@@ -556,6 +775,13 @@ export class Worker {
         case '/api/deny':
           this.hub?.deny(String(body.id ?? ''));
           return reply(200, { ok: true });
+        case '/api/stepdown': {
+          // Before a planned restart of this computer's program (tools/restart-when-idle.ps1): hand the duty on first.
+          if (this.role !== 'hub') return reply(200, { ok: true, role: this.role });
+          const to = await this.handOff();
+          if (to) this.restart();
+          return reply(to ? 200 : 409, to ? { ok: true } : { error: '没有能接班的电脑' });
+        }
         case '/api/release-install':
           void this.installRelease();
           return reply(200, { ok: true });
@@ -637,9 +863,14 @@ export class Worker {
         const [, idle, locked] = cmd.split(' ');
         this.device?.presence(Number(idle) || 0, locked === '1');
       }
-      else if (cmd === 'quit') process.exit(0);
+      else if (cmd === 'sendnow' || cmd.startsWith('sendnow ')) {
+        // The owner, from the reminder or the tray's menu: send what waits for them into the window now.
+        const n = sendNow(cmd.slice('sendnow'.length).trim() || undefined);
+        activity(n ? `马上把 ${n} 条等着的消息送进去` : '那条消息已经送进去了');
+      }
+      else if (cmd === 'quit') void this.leave('退出程序').finally(() => process.exit(0));
     });
-    process.stdin.on('end', () => process.exit(0)); // the tray went away
+    process.stdin.on('end', () => void this.leave('托盘程序关闭').finally(() => process.exit(0))); // the tray went away
   }
 
   /** Under the tray, stdout carries tray messages; everything else goes to a log file, kept to two files of LOG_MAX. */
@@ -680,35 +911,6 @@ function slowReply(res: ServerResponse, value: Promise<unknown>): void {
     res.end(JSON.stringify(v));
   };
   void value.then(end, (e: Error) => end({ error: e.message }));
-}
-
-/** Streams a download to a file; gives up only when nothing arrives for HANDOVER_STALL_MS. Progress goes to the log. */
-export async function download(url: string, file: string): Promise<void> {
-  const abort = new AbortController();
-  let stall = setTimeout(() => abort.abort(new Error('no data for a minute')), HANDOVER_STALL_MS);
-  const res = await fetch(url, { signal: abort.signal });
-  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-  const total = Number(res.headers.get('content-length')) || 0;
-  const out = createWriteStream(file);
-  let got = 0;
-  let said = Date.now();
-  try {
-    for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-      clearTimeout(stall);
-      stall = setTimeout(() => abort.abort(new Error('no data for a minute')), HANDOVER_STALL_MS);
-      got += chunk.length;
-      if (!out.write(chunk)) await new Promise((r) => out.once('drain', r));
-      if (Date.now() - said > 10_000) {
-        said = Date.now();
-        log('handover', `received ${(got / 1048576).toFixed(1)} of ${(total / 1048576).toFixed(1)} MB`);
-      }
-    }
-  } finally {
-    clearTimeout(stall);
-    await new Promise((r) => out.end(r));
-  }
-  if (total && got !== total) throw new Error(`incomplete: ${got} of ${total} bytes`);
-  log('handover', `received all ${(got / 1048576).toFixed(1)} MB`);
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {

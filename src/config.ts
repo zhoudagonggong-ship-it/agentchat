@@ -13,6 +13,9 @@ export interface Config {
   /** Generated once; proves to the hub that a reconnecting device is the one the owner allowed. */
   deviceSecret: string;
   paused: boolean;
+  /** The hub's term and the line that takes over when it is gone, as last heard (shift.ts). */
+  term?: number;
+  line?: HubRef[];
 }
 
 const FILE = join(DATA_DIR, 'config.json');
@@ -28,7 +31,8 @@ export function loadConfig(): Config {
   } catch {
     // first run
   }
-  const full: Config = { hub: config.hub ?? null, deviceSecret: config.deviceSecret ?? randomBytes(32).toString('base64url'), paused: config.paused ?? false };
+  const full: Config = { hub: config.hub ?? null, deviceSecret: config.deviceSecret ?? randomBytes(32).toString('base64url'), paused: config.paused ?? false,
+    term: config.term, line: config.line };
   if (!config.deviceSecret) saveConfig(full);
   return full;
 }

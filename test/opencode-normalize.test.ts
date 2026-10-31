@@ -27,3 +27,35 @@ test('maps a turn to messages, tool calls, outputs and a status', () => {
   assert.deepEqual(items.at(-1)!.data, { status: 'completed', startedAt: 2, completedAt: 5, error: null });
   assert.deepEqual(files, [{ itemId: 'file:call_2', turnId: 'msg_u', path: 'C:\\w\\out.md' }]);
 });
+
+test('messages sent while it runs join the running turn, which one idle ends', () => {
+  const { items } = normalizeMessages([
+    { id: 'msg_1', time: { created: 1000 }, text: '任务', type: 'user' },
+    { id: 'msg_2', time: { created: 2000 }, text: '补充一', type: 'user' },
+    { id: 'msg_3', time: { created: 3000 }, text: '补充二', type: 'user' },
+    { id: 'msg_r', time: { created: 4000 }, type: 'assistant', content: [{ type: 'text', text: '都做完了' }] },
+    { id: 'msg_i', time: { created: 5000 }, type: 'idle', outcome: 'succeeded' },
+    { id: 'msg_4', time: { created: 6000 }, text: '下一个任务', type: 'user' },
+  ], new Map());
+  assert.deepEqual(items.map((i) => [i.itemId, i.turnId]), [
+    ['msg_1', 'msg_1'], ['msg_2', 'msg_1'], ['msg_3', 'msg_1'], [textItemId('msg_r', 0), 'msg_1'], ['turn:msg_1', 'msg_1'], ['msg_4', 'msg_4'],
+  ]);
+});
+
+test('a run whose first message dropped out of the latest ones read goes on under its own name', () => {
+  // The first read: the task, and OpenCode still at it.
+  const first = normalizeMessages([{ id: 'msg_1', time: { created: 1000 }, text: '任务', type: 'user' }], new Map());
+  assert.deepEqual(first.run, { turn: 'msg_1', start: 1000, running: true });
+  // A later read sees only the latest messages: two added while it ran, then the end.
+  const later = normalizeMessages([
+    { id: 'msg_2', time: { created: 2000 }, text: '补充一', type: 'user' },
+    { id: 'msg_3', time: { created: 3000 }, text: '补充二', type: 'user' },
+    { id: 'msg_i', time: { created: 5000 }, type: 'idle', outcome: 'succeeded' },
+  ], new Map(), first.run!);
+  assert.deepEqual(later.items.map((i) => [i.itemId, i.turnId]), [['msg_2', 'msg_1'], ['msg_3', 'msg_1'], ['turn:msg_1', 'msg_1']]);
+  assert.deepEqual(later.items.at(-1)!.data, { status: 'completed', startedAt: 1, completedAt: 5, error: null });
+  assert.equal(later.run!.running, false);
+  // Read again with the run's own message in view: what was read says it all.
+  const again = normalizeMessages([{ id: 'msg_1', time: { created: 1000 }, text: '任务', type: 'user' }], new Map(), later.run!);
+  assert.deepEqual(again.run, { turn: 'msg_1', start: 1000, running: true });
+});

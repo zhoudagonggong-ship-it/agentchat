@@ -2,14 +2,15 @@
 /**
  * Daily release to GitHub: the code, its notes and the installer, for a day that had changes.
  *
- * Run every hour (the scheduled task "AgentChat daily release"); it acts in the release hour (Beijing time) only,
- * or later the same day when the computer was off then, and once per day:
- *   1. the day before (Beijing time) had commits in this repository? none: nothing to do;
+ * Run once a day by the Claude desktop app's scheduled task 「AgentChat 每日发布到 GitHub」 (which checks the result
+ * and tells the owner); it acts from the release hour (Beijing time) on, and once per day:
+ *   1. commits since the last release (its 「版本 x」 commit)? none: nothing to do;
  *   2. the version is that day's date (2026.10.29): set in package.json and committed;
  *   3. the installer is built from that commit, never from the working tree (work in progress stays out);
  *   4. the public copy (build/public, a history of its own) is brought to that commit and checked for private
  *      details: any found, it stops and publishes nothing;
- *   5. notes are written from the day's commit messages (by Claude Code on this computer, without tools);
+ *   5. notes are written from those commit messages (by Claude Code on this computer, without tools); a dry run
+ *      keeps its notes (build/release-ready.json), and the release uses them while the changes are the same;
  *   6. the code is pushed with a tag, and a GitHub release is made with the installer and its SHA-256.
  * Each step goes to build/daily-release.log; the end is shown in the corner of the screen for a moment.
  *
@@ -25,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PUBLIC = join(ROOT, 'build', 'public');
 const LOG = join(ROOT, 'build', 'daily-release.log');
+const READY = join(ROOT, 'build', 'release-ready.json'); // notes a dry run wrote ahead, for the release to use
 const REPO = 'zhoudagonggong-ship-it/agentchat';
 const ZONE = 'Asia/Shanghai';
 const RELEASE_HOUR = 8;
@@ -121,6 +123,16 @@ ${subjects.map((s) => `- ${s}`).join('\n')}`;
   return text.trim();
 }
 
+/** Notes a dry run wrote for this very version and these very changes (none came since). */
+function readyNotes(version, subjects) {
+  try {
+    const r = JSON.parse(readFileSync(READY, 'utf8'));
+    return r.version === version && JSON.stringify(r.subjects) === JSON.stringify(subjects) && r.notes && !PRIVATE.test(r.notes) ? r.notes : null;
+  } catch {
+    return null;
+  }
+}
+
 function toast(text) {
   const ps = `Add-Type -AssemblyName System.Windows.Forms;$n=New-Object System.Windows.Forms.NotifyIcon;$n.Icon=[System.Drawing.SystemIcons]::Information;` +
     `$n.BalloonTipTitle='AgentChat 发布';$n.BalloonTipText='${text.replace(/'/g, "''")}';$n.Visible=$true;$n.ShowBalloonTip(4000);Start-Sleep -Seconds 5;$n.Dispose()`;
@@ -139,12 +151,17 @@ async function main() {
   if (git(PUBLIC, 'ls-remote', '--tags', 'origin', tag)) return;
   if (!existsSync(WORDS)) throw new Error('build/private-words.txt is missing: without it the check for private details cannot run');
 
-  // 1. The day's commits (Beijing time), the version bump of an earlier run left out.
+  // 1. What changed since the last release (its 「版本 x」 commit): the code released is the latest, so the notes cover
+  //    all of it, the hours after midnight included. No release before: that day's commits (Beijing time). A 「版本」
+  //    commit for this very version is from an attempt that failed, not a release.
+  const last = git(ROOT, 'log', '-E', '--grep=^版本 [0-9]+\\.[0-9]+\\.[0-9]+$', '--format=%H %s')
+    .split('\n').find((l) => l && !l.endsWith(` 版本 ${version}`))?.split(' ')[0];
   const from = new Date(`${day}T00:00:00+08:00`).toISOString();
   const to = new Date(new Date(`${day}T00:00:00+08:00`).getTime() + 86_400_000).toISOString();
-  const subjects = git(ROOT, 'log', `--since=${from}`, `--until=${to}`, '--format=%s').split('\n').filter((s) => s && !/^版本 \d+\.\d+\.\d+$/.test(s)).reverse();
-  if (!subjects.length) return log(`${day}: no changes, nothing to release`);
-  log(`${day}: ${subjects.length} commits, releasing ${tag}`);
+  const subjects = (last ? git(ROOT, 'log', `${last}..HEAD`, '--format=%s') : git(ROOT, 'log', `--since=${from}`, `--until=${to}`, '--format=%s'))
+    .split('\n').filter((s) => s && !/^版本 \d+\.\d+\.\d+$/.test(s)).reverse();
+  if (!subjects.length) return log(`${day}: no changes since the last release, nothing to release`);
+  log(`${day}: ${subjects.length} commits since the last release, releasing ${tag}`);
 
   // 2. The version, committed on its own (whatever else is being worked on stays as it is).
   const dry = args.includes('--dry');
@@ -179,16 +196,23 @@ async function main() {
   const leak = added.find((l) => PRIVATE.test(l));
   if (leak) throw new Error(`private details in the changes, nothing published: ${leak.slice(0, 120)}`);
 
-  // 5. Notes. 6. Code, tag and release.
-  const notes = await notesFor(version, subjects);
+  // 5. Notes: the ones a dry run wrote ahead (the owner may have read them) while the changes are still the same.
+  // 6. Code, tag and release.
+  const ready = readyNotes(version, subjects);
+  const notes = ready ?? (await notesFor(version, subjects));
   if (!notes) throw new Error('no notes without private details, nothing published');
   const notesFile = join(stage, 'notes.md');
   writeFileSync(notesFile, `${notes}\n`, 'utf8');
-  if (dry) return log(`dry run: ${tag} ready, ${added.length} lines added, installer ${zip}, notes ${notesFile}; nothing published`);
+  if (dry) {
+    writeFileSync(READY, JSON.stringify({ version, subjects, notes }, null, 2), 'utf8');
+    return log(`dry run: ${tag} ready, ${added.length} lines added, installer ${zip}, notes ${notesFile} (kept for the release); nothing published`);
+  }
+  if (ready) log('using the notes written ahead');
   if (git(PUBLIC, 'status', '--porcelain')) git(PUBLIC, 'commit', '-q', '-F', notesFile);
   git(PUBLIC, 'tag', '-a', tag, '-m', `AgentChat ${version}`);
   git(PUBLIC, 'push', 'origin', 'main', tag);
   execFileSync(GH, ['release', 'create', tag, zip, `${zip}.sha256`, '--repo', REPO, '--title', `AgentChat ${version}`, '--notes-file', notesFile], { encoding: 'utf8' });
+  rmSync(READY, { force: true });
   log(`${tag} released with ${(statSync(zip).size / 1048576).toFixed(1)} MB installer`);
   toast(`已发布 ${tag}：代码、说明和安装包`);
 }

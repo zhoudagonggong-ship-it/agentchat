@@ -17,10 +17,21 @@ function tail(text: unknown): string {
   return s.length > OUTPUT_TAIL ? '…' + s.slice(-OUTPUT_TAIL) : s;
 }
 
+// What the desktop app puts before a prompt for the model (the page the owner has open beside the chat, reminders):
+// not what was typed or sent, and in the way of matching a message to the request that sent it.
+const CONTEXT = /^\s*(?:<(artifact-view-context|system-reminder)\b[^>]*>[\s\S]*?<\/\1>|<artifact-content-authored-by-others\/>)/;
+
+export function withoutContext(text: string): string {
+  let rest = text.replace(/^﻿/, '');
+  for (let m = CONTEXT.exec(rest); m; m = CONTEXT.exec(rest)) rest = rest.slice(m[0].length);
+  return rest.replace(/^\s+/, '');
+}
+
 function userText(content: unknown): string | null {
-  if (typeof content === 'string') return content.replace(/^﻿/, '');
+  if (typeof content === 'string') return withoutContext(content) || null;
   if (!Array.isArray(content)) return null;
-  const parts = content.map((c: any) => (c?.type === 'text' ? c.text : c?.type === 'image' ? '[图片]' : null)).filter((x): x is string => x !== null);
+  const parts = content.map((c: any) => (c?.type === 'text' ? withoutContext(c.text) : c?.type === 'image' ? '[图片]' : null))
+    .filter((x): x is string => x !== null && x !== '');
   return parts.length ? parts.join('\n') : null;
 }
 

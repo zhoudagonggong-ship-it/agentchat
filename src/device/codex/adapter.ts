@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { promisify } from 'node:util';
 import type { Adapter, AdapterSink } from '../device.ts';
 import type { AgentInfo, Command, Item, ProjectInfo, SessionInfo } from '../../shared/protocol.ts';
-import { withAttachments } from '../../shared/protocol.ts';
+import { carriesTag, recordsCall, withAttachments } from '../../shared/protocol.ts';
 import { debounce, log } from '../../shared/util.ts';
 import { CodexRpc } from './rpc.ts';
 import { normalizeTurn, type OutputFile } from './normalize.ts';
@@ -129,7 +129,7 @@ export class CodexAdapter implements Adapter {
   private refreshing = false;
   private refreshAgain = false;
   private approvalSeq = 0;
-  private readonly scheduleRefresh = debounce(() => void this.refresh(), 800);
+  private readonly scheduleRefresh = debounce(() => void this.refresh(), 800, 2000); // read even while a run writes on
   /** Nothing of ours running any more: close our app-server, which is what really hands conversations back. */
   private readonly recycleSoon = debounce(() => {
     if (this.activeTurn.size || this.approvals.size || !this.held) return;
@@ -200,12 +200,21 @@ export class CodexAdapter implements Adapter {
           await this.ensureLoaded(threadId);
           const input: Record<string, unknown>[] = [{ type: 'text', text, text_elements: [] }];
           for (const f of files) if (f.path && /^image\/(png|jpeg|gif|webp)$/.test(f.mime)) input.push({ type: 'localImage', path: f.path });
-          const running = this.activeTurn.get(threadId);
+          let running = this.activeTurn.get(threadId);
           if (running) {
             // A turn is in progress: guide it with the new message, as typing into a running turn does on the computer.
-            const res = await this.rpc.call<{ turnId: string }>('turn/steer', { threadId, expectedTurnId: running, input, clientUserMessageId: requestId });
-            this.sink.receipt(requestId, 'accepted', res.turnId);
-          } else {
+            try {
+              const res = await this.rpc.call<{ turnId: string }>('turn/steer', { threadId, expectedTurnId: running, input, clientUserMessageId: requestId });
+              this.sink.receipt(requestId, 'accepted', res.turnId);
+            } catch (error) {
+              // It ended without our hearing of it (cut off, say): the message starts a turn of its own.
+              if (!/no active turn/i.test((error as Error).message)) throw error;
+              log('codex', `turn ${running} had ended; starting a new one`);
+              this.activeTurn.delete(threadId);
+              running = undefined;
+            }
+          }
+          if (!running) {
             const res = await this.rpc.call<{ turn: { id: string } }>('turn/start', { threadId, input, clientUserMessageId: requestId });
             this.activeTurn.set(threadId, res.turn.id);
             this.held = true;
@@ -276,33 +285,51 @@ export class CodexAdapter implements Adapter {
     }
   }
 
-  /**
-   * Which conversation is calling the AgentChat tool right now. Codex does not tell its tools, but each conversation's
-   * record (~/.codex/sessions/<year>/<month>/<day>/rollout-…-<id>.jsonl) gets the call the moment it is made: the
-   * newest record that changed in the last seconds and names the tool is the caller. null when none is sure.
-   */
-  callerThread(): string | null {
+  /** Conversation records (~/.codex/sessions/<year>/<month>/<day>/rollout-…-<id>.jsonl) written since `since`, by id. */
+  private recentRollouts(since: number): { id: string; file: string }[] {
     const root = join(this.home, 'sessions');
-    const since = Date.now() - 20_000;
-    const days: string[] = [];
+    const out: { id: string; file: string }[] = [];
     for (const back of [0, 1]) {
       const d = new Date(Date.now() - back * 86_400_000);
-      days.push(join(root, String(d.getFullYear()), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')));
-    }
-    const recent: { file: string; mtime: number }[] = [];
-    for (const dir of days) {
+      const dir = join(root, String(d.getFullYear()), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0'));
       if (!existsSync(dir)) continue;
       for (const f of readdirSync(dir)) {
-        if (!f.endsWith('.jsonl')) continue;
-        const mtime = statSync(join(dir, f)).mtimeMs;
-        if (mtime >= since) recent.push({ file: join(dir, f), mtime });
+        const id = ROLLOUT_ID.exec(f)?.[1];
+        if (id && statSync(join(dir, f)).mtimeMs >= since) out.push({ id, file: join(dir, f) });
       }
     }
-    recent.sort((a, b) => b.mtime - a.mtime);
-    for (const { file } of recent) {
-      if (tailOf(file, 64 * 1024).includes(`"${TOOL_NAME}"`)) return ROLLOUT_ID.exec(file)?.[1] ?? null;
+    return out;
+  }
+
+  /**
+   * The conversations whose record shows a call of the AgentChat tool carrying the message `key` stands for, in the
+   * last two minutes. Codex does not tell its tools which conversation calls, but writes each call down as it is made.
+   */
+  caller(key: string): string[] {
+    return this.recentRollouts(Date.now() - 120_000)
+      .filter((r) => tailOf(r.file, 256 * 1024).split('\n').some((line) => recordsCall(line, key))).map((r) => r.id);
+  }
+
+  /**
+   * The conversations holding a message with this tag: waiting in Codex's own queue for the desktop app to take
+   * (~/.codex/queue_1.sqlite, gone from there once taken), or in a conversation's record written in the last half hour.
+   */
+  locate(tag: string): string[] {
+    const out = new Set<string>();
+    const queue = join(this.home, 'queue_1.sqlite');
+    if (existsSync(queue)) {
+      const db = new DatabaseSync(queue, { readOnly: true });
+      try {
+        const rows = db.prepare('SELECT thread_id, payload_json FROM queued_items WHERE payload_json LIKE ?').all(`%#${tag}]%`) as { thread_id: string; payload_json: string }[];
+        for (const r of rows) if (carriesTag(r.payload_json, tag)) out.add(r.thread_id);
+      } catch {
+        // a Codex of another make: its queue is not looked into
+      } finally {
+        db.close();
+      }
     }
-    return null;
+    for (const r of this.recentRollouts(Date.now() - 30 * 60_000)) if (carriesTag(tailOf(r.file, 4 * 1024 * 1024), tag)) out.add(r.id);
+    return [...out];
   }
 
   /** A turn running in our app-server, or an approval waiting on it: both end with it when this program restarts. */

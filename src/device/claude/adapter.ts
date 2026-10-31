@@ -12,12 +12,13 @@ import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import type { Adapter, AdapterSink } from '../device.ts';
 import type { AgentInfo, Command, Item, ProjectInfo, SessionInfo } from '../../shared/protocol.ts';
-import { withAttachments } from '../../shared/protocol.ts';
+import { carriesTag, markTag, withAttachments } from '../../shared/protocol.ts';
 import { debounce, log } from '../../shared/util.ts';
-import { Transcript, peek } from './transcript.ts';
+import { Transcript, peek, withoutContext } from './transcript.ts';
 import { toolCommand } from '../tool.ts';
 import { DATA_DIR } from '../../config.ts';
 import { activity } from '../../activity.ts';
+import { hold, release, senderOf } from '../held.ts';
 
 const HYDRATE_TURNS = 20;
 // A turn can sit on one long command for many minutes without writing; only after this long is an unfinished turn taken as abandoned.
@@ -46,6 +47,9 @@ function saveLearnedUi(v: { claudeSend?: string[] }): void {
 const WINDOW_WAIT_MS = 2 * 3_600_000;
 // Only these leave the window out: no desktop app running, or a conversation it does not list. Nothing to bypass then.
 const CLI_ONLY = new Set(['no_window', 'not_listed']);
+// What keeps a message out of the window for the owner's sake: they are using the computer, have a draft in the box,
+// or the conversation still runs. The owner is told, and may say to send it in now.
+const OWNER_WAITS = new Set(['in_use', 'busy', 'draft']);
 // Claude Code ends a hook after 600 s; give up on the phone a little before.
 const HOOK_WAIT_MS = 590_000;
 
@@ -166,8 +170,10 @@ export class ClaudeCodeAdapter implements Adapter {
   private learnCount = 0;
   private readonly asks = new Map<string, PendingAsk>();
   private askSeq = 0;
-  private readonly flush = debounce(() => void this.refresh(), 600);
-  private readonly relist = debounce(() => void this.refresh(true), 1200);
+  // One for every conversation's file: while one of them is written to all the time (a turn running commands writes
+  // its progress every moment), the others are still read within a second and a half.
+  private readonly flush = debounce(() => void this.refresh(), 600, 1500);
+  private readonly relist = debounce(() => void this.refresh(true), 1200, 5000);
 
   constructor(exe: string | null) {
     this.exe = exe;
@@ -211,7 +217,14 @@ export class ClaudeCodeAdapter implements Adapter {
   async command(threadId: string, command: Command): Promise<void> {
     const { requestId } = command;
     if (command.op === 'send') {
-      if (this.runs.has(threadId)) return this.sink.receipt(requestId, 'failed', undefined, 'busy');
+      // A run of ours still going in this conversation (a message before this one): this one waits its turn, as a
+      // message typed into a busy window does, and goes in once that run has ended.
+      if (this.runs.has(threadId)) {
+        this.sink.receipt(requestId, 'pending', undefined, 'waiting_for_window');
+        const until = Date.now() + WINDOW_WAIT_MS;
+        while (this.runs.has(threadId) && Date.now() < until) await new Promise((r) => setTimeout(r, 2_000));
+        if (this.runs.has(threadId)) return this.sink.receipt(requestId, 'failed', undefined, 'busy');
+      }
       const text = withAttachments(command.text ?? '', command.files ?? []);
       // A desktop conversation: always typed into the desktop app itself, as the owner would, which then stays its
       // only writer. A message written behind its back would be unseen there until the app restarts, and fork the
@@ -219,7 +232,7 @@ export class ClaudeCodeAdapter implements Adapter {
       const title = this.meta.get(threadId)?.title;
       let fallback = false;
       if (title) {
-        const sent = await this.sendInWindow(threadId, title, text, requestId);
+        const sent = await this.sendInWindow(threadId, title, text, requestId, command.origin?.label ?? senderOf(text));
         if (sent) return;
         fallback = true;
       }
@@ -259,7 +272,7 @@ export class ClaudeCodeAdapter implements Adapter {
    * Messages for one conversation keep their order. Resolves false when only the CLI can carry it: no desktop app
    * running, or the conversation is not in its list; the receipt is then the caller's.
    */
-  private sendInWindow(threadId: string, title: string, text: string, requestId: string): Promise<boolean> {
+  private sendInWindow(threadId: string, title: string, text: string, requestId: string, who: string): Promise<boolean> {
     const previous = this.windowQueues.get(threadId) ?? Promise.resolve(true);
     // Only what the conversation took after this message came in can be this message (a little slack for clocks).
     const since = Date.now() - 5_000;
@@ -267,22 +280,29 @@ export class ClaudeCodeAdapter implements Adapter {
       const deadline = Date.now() + WINDOW_WAIT_MS;
       let told = false;
       let lastReason = '';
+      let now = false; // the owner said: send it in now
       for (;;) {
         // Sent already, by the owner pressing Send on what we put in the box, say: done, never a second time.
         if (this.inTranscript(threadId, text, since)) {
           this.sink.receipt(requestId, 'accepted');
           return true;
         }
-        // Its turn still running (its transcript says so): wait without going near the window at all.
+        // Its turn still running (its transcript says so): wait without going near the window at all, unless the
+        // owner said to send it now (the app then queues it for after the turn, as pressing Enter there does).
         let running = false;
         try {
           running = this.files.has(threadId) && this.describe(threadId).running;
         } catch {
           running = false; // being rewritten: let the window tell
         }
-        const ui = running ? { ok: false, reason: 'busy' } : await this.desktopSend(title, text);
+        const ui = running && !now ? { ok: false, reason: 'busy' } : await this.desktopSend(title, text, now);
         if (ui.ok) {
           this.sink.receipt(requestId, 'accepted');
+          log('claude', `desktop send ok: ${title}`);
+          // Typed into another conversation's box (a pane that had not caught up, say), it never shows up here.
+          setTimeout(() => {
+            if (!this.inTranscript(threadId, text, since)) log('claude', `desktop send: not in ${title}'s transcript 15 s later, it may have gone into another conversation`);
+          }, 15_000);
           return true;
         }
         if (CLI_ONLY.has(ui.reason)) {
@@ -304,15 +324,20 @@ export class ClaudeCodeAdapter implements Adapter {
           told = true;
           this.sink.receipt(requestId, 'pending', undefined, 'waiting_for_window');
         }
+        // Waiting on the owner (at the keyboard, a draft in the box, the turn running): the owner hears of it.
+        const h = OWNER_WAITS.has(ui.reason) ? hold(requestId, who, title, ui.reason) : null;
         if (Date.now() > deadline) {
           this.sink.receipt(requestId, 'failed', undefined, 'window_unavailable');
           return true;
         }
-        await new Promise((r) => setTimeout(r, 8_000)); // a look at the window only: the box is left alone meanwhile
+        // A look at the window every 8 s only (the box is left alone meanwhile), at once when the owner says so.
+        for (let i = 0; i < 8 && !(h?.now && !now); i++) await new Promise((r) => setTimeout(r, 1_000));
+        now = h?.now ?? now;
       }
     });
     this.windowQueues.set(threadId, run);
     void run.finally(() => {
+      release(requestId);
       if (this.windowQueues.get(threadId) === run) this.windowQueues.delete(threadId);
     });
     return run;
@@ -373,6 +398,9 @@ export class ClaudeCodeAdapter implements Adapter {
   private inTranscript(threadId: string, text: string, since: number): boolean {
     const file = this.files.get(threadId);
     if (!file) return false;
+    // A forwarded message is known by its tag, wherever it stands in what the app wrote down.
+    const mark = markTag(text);
+    if (mark) return this.locate(mark).includes(threadId);
     const want = text.replace(/\s+/g, '').slice(0, 400);
     if (!want) return false;
     try {
@@ -397,14 +425,40 @@ export class ClaudeCodeAdapter implements Adapter {
         const at = Date.parse(r.timestamp ?? '');
         if (at < since) break;
         const content = r.type === 'queue-operation' ? r.content : r.type === 'user' ? r.message?.content : null;
-        const said = typeof content === 'string' ? content
-          : Array.isArray(content) ? content.map((c: any) => (c?.type === 'text' ? c.text : '')).join('') : '';
+        // Without what the desktop app puts before a prompt (the page the owner has open beside the chat).
+        const said = withoutContext(typeof content === 'string' ? content
+          : Array.isArray(content) ? content.map((c: any) => (c?.type === 'text' ? c.text : '')).join('') : '');
         if (said && said.replace(/\s+/g, '').startsWith(want)) return true;
       }
     } catch {
       // being rewritten: look again next time
     }
     return false;
+  }
+
+  /**
+   * The conversations whose transcript holds a message with this tag, sent or queued for after the running turn
+   * (Claude Code records both). Only transcripts written in the last half hour: a message just put in is there.
+   */
+  locate(tag: string): string[] {
+    const out: string[] = [];
+    for (const [threadId, file] of this.files) {
+      try {
+        const { size, mtimeMs } = statSync(file);
+        if (mtimeMs < Date.now() - 30 * 60_000) continue;
+        const fd = openSync(file, 'r');
+        const buf = Buffer.alloc(Math.min(size, 4 * 1024 * 1024));
+        try {
+          readSync(fd, buf, 0, buf.length, size - buf.length);
+        } finally {
+          closeSync(fd);
+        }
+        if (carriesTag(buf.toString('utf8'), tag)) out.push(threadId);
+      } catch {
+        // being rewritten: looked at again shortly
+      }
+    }
+    return out;
   }
 
   /** A CLI turn of ours, a question waiting for the phone, or a message waiting for the window. */
@@ -447,7 +501,9 @@ export class ClaudeCodeAdapter implements Adapter {
     if (!this.exe) throw new Error('claude_not_found');
     cwd ||= homedir();
     const threadId = randomUUID();
-    const child = this.runCli(threadId, ['--session-id', threadId, '--name', title], cwd, withAttachments(first.text, first.files ?? []), first.requestId);
+    // Attachments live outside the project folder: let the run read their folders, as for any message.
+    const dirs = [...new Set((first.files ?? []).flatMap((f) => (f.path ? [dirname(f.path)] : [])))].flatMap((d) => ['--add-dir', d]);
+    const child = this.runCli(threadId, ['--session-id', threadId, '--name', title, ...dirs], cwd, withAttachments(first.text, first.files ?? []), first.requestId);
     // Its transcript appears as soon as the run starts; report it before answering, so the hub knows it.
     for (let i = 0; i < 120 && !this.files.has(threadId) && child.exitCode === null; i++) {
       await new Promise((r) => setTimeout(r, 250));
@@ -546,9 +602,9 @@ export class ClaudeCodeAdapter implements Adapter {
   }
 
   /** One at a time: each send drives the same desktop window. */
-  private desktopSend(title: string, text: string): Promise<{ ok: boolean; reason: string; row?: RowButton[] }> {
+  private desktopSend(title: string, text: string, now = false): Promise<{ ok: boolean; reason: string; row?: RowButton[] }> {
     const run = this.uiQueue.then(() => new Promise<{ ok: boolean; reason: string; row?: RowButton[] }>((resolve) => {
-      const payload = Buffer.from(JSON.stringify({ title, text, sendNames: learnedUi().claudeSend }), 'utf8').toString('base64');
+      const payload = Buffer.from(JSON.stringify({ title, text, now, sendNames: learnedUi().claudeSend }), 'utf8').toString('base64');
       // On stdin, not the command line: a long message would not fit there (spawn ENAMETOOLONG).
       const child = execFile('powershell.exe', ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', DESKTOP_SEND],
         { windowsHide: true, timeout: 60_000 }, (error, stdout, stderr) => {

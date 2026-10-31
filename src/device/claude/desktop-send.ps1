@@ -10,10 +10,11 @@ $ErrorActionPreference = 'Stop'
 # Usually on stdin: a long message would not fit in a command line (about 32,000 characters at most on Windows).
 if (-not $Payload) { $Payload = [Console]::In.ReadToEnd().Trim() }
 [Console]::OutputEncoding = [Text.Encoding]::UTF8 # the answer may name buttons in Chinese
-$script:Row = $null
+$script:RowNames = $null
 function Done([bool]$ok, [string]$reason = '') {
   $out = @{ ok = $ok; reason = $reason }
-  if ($script:Row) { $out.row = $script:Row }
+  # Its own name: PowerShell names ignore case, and $row below holds the row's UI elements themselves.
+  if ($script:RowNames) { $out.row = $script:RowNames }
   [Console]::Out.WriteLine(($out | ConvertTo-Json -Compress -Depth 4))
   exit 0
 }
@@ -63,7 +64,7 @@ public static uint IdleMs() { var i = new LASTINPUTINFO(); i.cbSize = (uint)Mars
   # have left the keyboard and mouse alone for a while does it switch, send, and switch back to what they had open.
   $back = $null
   if (-not (IsOpen)) {
-    if ([AllinOne.Input]::IdleMs() -lt 30000) { Done $false 'in_use' }
+    if (-not $req.now -and [AllinOne.Input]::IdleMs() -lt 30000) { Done $false 'in_use' }
     $back = OpenTitle
     $n = OpenEntry $req.title
     if ($n -eq 0) { Done $false 'not_listed' }
@@ -71,6 +72,9 @@ public static uint IdleMs() { var i = new LASTINPUTINFO(); i.cbSize = (uint)Mars
     $opened = $false
     for ($i = 0; $i -lt 50 -and -not $opened; $i++) { Start-Sleep -Milliseconds 200; $opened = IsOpen }
     if (-not $opened) { Done $false 'not_opened' }
+    # The title bar changes before the rest of the pane: for a moment the prompt box is still the previous
+    # conversation's, and a message typed there lands in it. Let the pane settle.
+    Start-Sleep -Milliseconds 1500
   }
   # Leaves the window on the conversation the owner had open, then answers.
   function Finish([bool]$ok, [string]$reason = '') {
@@ -78,10 +82,26 @@ public static uint IdleMs() { var i = new LASTINPUTINFO(); i.cbSize = (uint)Mars
     Done $ok $reason
   }
 
+  # The conversation's own prompt box: with several conversations side by side (split view) each pane has one, and
+  # the first in the window may well be another conversation's. Its pane is the one under its title bar.
+  # Up from the title bar to the first container holding a prompt box: that pane's box if it holds just one; none
+  # rather than a guess when it holds several (better the message waits than lands in another conversation).
+  $promptBox = New-Object System.Windows.Automation.AndCondition(
+    (New-Object $P($A::ControlTypeProperty, $CT::Edit)), (New-Object $P($A::NameProperty, '提示词')))
+  function PaneBox {
+    $head = @(Buttons "$($req.title)$suffix")
+    if ($head.Count -ne 1) { return $null }
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    for ($up = $walker.GetParent($head[0]); $up; $up = $walker.GetParent($up)) {
+      $found = @($up.FindAll($T::Descendants, $promptBox))
+      if ($found.Count -eq 1) { return $found[0] }
+      if ($found.Count -gt 1) { return $null }
+    }
+    return $null
+  }
   $box = $null
   for ($i = 0; $i -lt 25 -and -not $box; $i++) {
-    $box = $root.FindFirst($T::Descendants, (New-Object System.Windows.Automation.AndCondition(
-      (New-Object $P($A::ControlTypeProperty, $CT::Edit)), (New-Object $P($A::NameProperty, '提示词')))))
+    $box = PaneBox
     if (-not $box) { Start-Sleep -Milliseconds 200 }
   }
   if (-not $box) { Finish $false 'no_prompt_box' }
@@ -105,7 +125,8 @@ public static uint IdleMs() { var i = new LASTINPUTINFO(); i.cbSize = (uint)Mars
     $y = if ($mic) { $mic.Current.BoundingRectangle.Y + $mic.Current.BoundingRectangle.Height / 2 } else { $r.Bottom - 14 }
     @($all | Where-Object { $b = $_.Current.BoundingRectangle; [Math]::Abs(($b.Y + $b.Height / 2) - $y) -lt 20 })
   }
-  if (@(RowButtons | Where-Object { $_.Current.Name -eq '停止' }).Count) { Finish $false 'busy' }
+  # Unless the owner said to send it now: the app then queues it for after the turn, as pressing Enter there does.
+  if (-not $req.now -and @(RowButtons | Where-Object { $_.Current.Name -eq '停止' }).Count) { Finish $false 'busy' }
   $vp.SetValue([string]$req.text)
   # The box takes a moment to show what was set, longer while the window is busy.
   $want = & $flat $req.text
@@ -127,9 +148,12 @@ public static uint IdleMs() { var i = new LASTINPUTINFO(); i.cbSize = (uint)Mars
   if (-not $send) {
     & $clear # leave the box as it was
     # The row's buttons, so the adapter can find out (once) which one sends in this version of the app.
-    $script:Row = @($row | ForEach-Object { @{ name = $_.Current.Name; x = [int]$_.Current.BoundingRectangle.X; enabled = $_.Current.IsEnabled } })
+    $script:RowNames = @($row | ForEach-Object { @{ name = $_.Current.Name; x = [int]$_.Current.BoundingRectangle.X; enabled = $_.Current.IsEnabled } })
     Finish $false ('no_send_button: ' + (($row | ForEach-Object { $_.Current.Name }) -join '|'))
   }
+  # Last look before it goes: still this conversation, still this box.
+  $now = PaneBox
+  if (-not (IsOpen) -or -not $now -or -not [System.Windows.Automation.Automation]::Compare($now, $box)) { & $clear; Finish $false 'switched' }
   $send.GetCurrentPattern($Invoke).Invoke()
   for ($i = 0; $i -lt 15; $i++) {
     Start-Sleep -Milliseconds 200

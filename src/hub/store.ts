@@ -3,9 +3,10 @@
 import { DatabaseSync } from 'node:sqlite';
 import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AgentInfo, Attachment, Command, CommandOp, DeviceView, FriendView, Item, ItemView, MemberSeed, ProjectInfo, RequestState, RequestView, SessionInfo, SessionView } from '../shared/protocol.ts';
-import { ATTACHMENT_MARK, sessionKey } from '../shared/protocol.ts';
+import type { AgentInfo, Attachment, DeviceView, FriendView, Item, ItemView, MemberSeed, ProjectInfo, SessionInfo, SessionView } from '../shared/protocol.ts';
+import { markTag, sessionKey } from '../shared/protocol.ts';
 import { sha256 } from '../shared/util.ts';
+import { Ledger } from './ledger.ts';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -31,14 +32,15 @@ CREATE TABLE IF NOT EXISTS artifacts (
 
 interface SessionRow { id: string; device_id: string; agent_id: string; thread_id: string; title: string; cwd: string | null;
   updated_at: number; running: number; active_turn_id: string | null; preview: string | null; hydrated: number; seq: number;
-  project_id: string | null; project_name: string | null; pinned: number; muted: number; replies: number; read_replies: number }
+  project_id: string | null; project_name: string | null; pinned: number; muted: number; replies: number; read_replies: number;
+  quiet: number; read_quiet: number; cared_at: number | null }
 interface ItemRow { session_id: string; item_id: string; turn_id: string | null; kind: string; ts: number; data: string; seq: number }
-interface RequestRow { request_id: string; session_id: string; op: string; payload: string; text: string | null; state: string;
-  turn_id: string | null; error: string | null; created_at: number; seq: number }
 interface DeviceRow { id: string; name: string; secret_hash: string; approved: number; agents: string; last_seen: number }
 
 export class Store {
   readonly db: DatabaseSync;
+  /** Every request to a conversation and what it still owes (see ledger.ts). */
+  readonly ledger: Ledger;
   readonly artifactDir: string;
   private seq: number;
 
@@ -71,15 +73,35 @@ export class Store {
     if (!(this.db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[]).some((c) => c.name === 'muted')) {
       this.db.exec('ALTER TABLE sessions ADD COLUMN muted INTEGER NOT NULL DEFAULT 0');
     }
-    // Hand-offs whose outcome reached the agent that sent them (by `wait`, or a report into its conversation).
-    this.db.exec('CREATE TABLE IF NOT EXISTS handbacks (request_id TEXT PRIMARY KEY, at INTEGER NOT NULL)');
+    // Replies to agents' messages are counted apart (`quiet`): the owner sees them, unobtrusively, and is not reminded.
+    // `cared_at`: when the conversation last had something for the owner; the list goes by it.
+    if (!(this.db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[]).some((c) => c.name === 'cared_at')) {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN quiet INTEGER NOT NULL DEFAULT 0; ALTER TABLE sessions ADD COLUMN read_quiet INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE sessions ADD COLUMN cared_at INTEGER; UPDATE sessions SET cared_at = updated_at`);
+    }
     const row =this.db.prepare("SELECT value FROM meta WHERE key = 'seq'").get() as { value: string } | undefined;
     this.seq = row ? Number(row.value) : 0;
+    this.ledger = new Ledger(this.db, () => this.nextSeq());
     this.placeArtifacts();
+  }
+
+  /** One item of a conversation, as kept. */
+  item(sessionId: string, itemId: string): Item | undefined {
+    const r = this.db.prepare('SELECT * FROM items WHERE session_id = ? AND item_id = ?').get(sessionId, itemId) as ItemRow | undefined;
+    return r ? { itemId: r.item_id, turnId: r.turn_id, kind: r.kind as Item['kind'], ts: r.ts, data: JSON.parse(r.data) } : undefined;
   }
 
   get currentSeq(): number {
     return this.seq;
+  }
+
+  /**
+   * Taking over from a copy that may lack the old hub's last moments: numbers go on from well past anything a phone saw
+   * then, so a phone asking for "everything after N" misses nothing written from now on.
+   */
+  skipSeq(by: number): void {
+    this.seq += by;
+    this.db.prepare("INSERT INTO meta(key, value) VALUES ('seq', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(this.seq));
   }
 
   private nextSeq(): number {
@@ -200,65 +222,6 @@ export class Store {
     this.db.prepare('INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(`setting:${key}`, value);
   }
 
-  /** The request that started a turn, if one did. */
-  requestForTurn(sessionId: string, turnId: string): string | null {
-    return (this.db.prepare("SELECT request_id FROM requests WHERE session_id = ? AND turn_id = ? AND op = 'send' LIMIT 1").get(sessionId, turnId) as { request_id: string } | undefined)?.request_id ?? null;
-  }
-
-  /** How many messages an agent sent other agents since `since` (ms). */
-  agentSends(deviceId: string, agentId: string, since: number): number {
-    return (this.db.prepare(`SELECT COUNT(*) AS n FROM requests WHERE op = 'send' AND created_at > ?
-      AND json_extract(payload, '$.origin.deviceId') = ? AND json_extract(payload, '$.origin.agentId') = ?`).get(since, deviceId, agentId) as { n: number }).n;
-  }
-
-  /**
-   * How deep in a chain of hand-offs this agent works now: the deepest recent message another agent sent it
-   * (0 when nobody did). A sends B (1), B sends C (2)…
-   */
-  /** Whether another agent has ever sent this conversation anything through AgentChat. */
-  hasAgentMessages(sessionId: string): boolean {
-    return Boolean(this.db.prepare(`SELECT 1 FROM requests WHERE session_id = ? AND op = 'send' AND json_extract(payload, '$.origin.deviceId') IS NOT NULL LIMIT 1`).get(sessionId));
-  }
-
-  /** The sender of a hand-off has its outcome: `wait` brought it back, or the report was sent to its conversation. */
-  markHandedBack(requestId: string): boolean {
-    return this.db.prepare('INSERT OR IGNORE INTO handbacks(request_id, at) VALUES (?, ?)').run(requestId, Date.now()).changes > 0;
-  }
-
-  handedBack(requestId: string): boolean {
-    return Boolean(this.db.prepare('SELECT 1 FROM handbacks WHERE request_id = ?').get(requestId));
-  }
-
-  /** Hand-off cards still open (their work not ended), to follow again after the hub restarts. */
-  openHandoffs(): { sessionId: string; item: Item }[] {
-    return (this.db.prepare("SELECT * FROM items WHERE kind = 'handoff' AND json_extract(data, '$.endedAt') IS NULL").all() as unknown as ItemRow[])
-      .map((r) => ({ sessionId: r.session_id, item: { itemId: r.item_id, turnId: r.turn_id, kind: 'handoff', ts: r.ts, data: JSON.parse(r.data) } }));
-  }
-
-  /**
-   * How far down a chain of hand-offs the work in this conversation is: what started its latest turn. The owner's own
-   * message (from the phone, or typed on the computer) starts a new chain, 0; another agent's carries that one's depth.
-   * Hand-offs older than `since` count as finished.
-   */
-  turnDepth(sessionId: string, since: number): number {
-    const req = this.db.prepare(`SELECT created_at, json_extract(payload, '$.origin.depth') AS d, json_extract(payload, '$.origin.deviceId') AS o
-      FROM requests WHERE session_id = ? AND op = 'send' AND state NOT IN ('failed', 'cancelled') ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(sessionId) as
-      { created_at: number; d: number | null; o: string | null } | undefined;
-    const typed = this.db.prepare(`SELECT ts, json_extract(data, '$.text') AS text FROM items WHERE session_id = ? AND kind = 'message'
-      AND json_extract(data, '$.role') = 'user' ORDER BY ts DESC LIMIT 1`).get(sessionId) as { ts: number; text: string | null } | undefined;
-    // Typed by the owner after the last request: the owner's chain. Forwarded messages carry the 「[来自 …」 mark.
-    if (typed && !String(typed.text ?? '').startsWith('[来自 ') && (!req || typed.ts >= req.created_at)) return 0;
-    if (!req?.o || req.created_at <= since) return 0;
-    return req.d ?? 1;
-  }
-
-  chainDepth(deviceId: string, agentId: string, since: number): number {
-    const r = this.db.prepare(`SELECT MAX(COALESCE(json_extract(r.payload, '$.origin.depth'), 1)) AS d FROM requests r JOIN sessions s ON s.id = r.session_id
-      WHERE s.device_id = ? AND s.agent_id = ? AND r.op = 'send' AND r.created_at > ? AND r.state NOT IN ('failed', 'cancelled')
-      AND json_extract(r.payload, '$.origin.deviceId') IS NOT NULL`).get(deviceId, agentId, since) as { d: number | null };
-    return r.d ?? 0;
-  }
-
   setProjects(deviceId: string, agentId: string, projects: ProjectInfo[]): boolean {
     const json = JSON.stringify(projects);
     const old = this.db.prepare('SELECT projects FROM agent_projects WHERE device_id = ? AND agent_id = ?').get(deviceId, agentId) as { projects: string } | undefined;
@@ -281,12 +244,13 @@ export class Store {
     const seen = new Set<string>();
     const select = this.db.prepare('SELECT * FROM sessions WHERE id = ?');
     const upsert = this.db.prepare(`INSERT INTO sessions(id, device_id, agent_id, thread_id, title, cwd, updated_at, running, active_turn_id, preview,
-        project_id, project_name, replies, archived, seq)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?)
+        project_id, project_name, replies, archived, seq, cared_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?7)
       ON CONFLICT(id) DO UPDATE SET title = excluded.title, cwd = excluded.cwd, updated_at = MAX(sessions.updated_at, excluded.updated_at),
         running = excluded.running, active_turn_id = excluded.active_turn_id, preview = COALESCE(excluded.preview, preview),
         project_id = excluded.project_id, project_name = excluded.project_name, archived = 0, seq = excluded.seq,
-        replies = sessions.replies + ?`);
+        replies = sessions.replies + ?14, quiet = sessions.quiet + ?15,
+        cared_at = CASE WHEN ?14 > 0 THEN MAX(COALESCE(sessions.cared_at, 0), excluded.updated_at) ELSE COALESCE(sessions.cared_at, excluded.updated_at) END`);
     this.db.exec('BEGIN');
     try {
       for (const s of sessions) {
@@ -306,9 +270,13 @@ export class Store {
         // One more reply to read: a turn finished, or the latest message changed while nothing runs. A rename, or the
         // agent touching its own records, moves the time too but is no reply. A conversation seen the first time has none.
         const reply = old && !s.running && (old.running || (s.updatedAt > old.updated_at && preview !== null && preview !== old.preview)) ? 1 : 0;
-        upsert.run(id, deviceId, agentId, s.threadId, s.title, s.cwd, s.updatedAt, s.running ? 1 : 0, s.activeTurnId, preview, projectId, projectName, seq, reply);
+        // A reply to another agent's message is the agents' own business: counted quietly (see fromAgent).
+        const quiet = reply && this.fromAgent(id) ? 1 : 0;
+        upsert.run(id, deviceId, agentId, s.threadId, s.title, s.cwd, s.updatedAt, s.running ? 1 : 0, s.activeTurnId, preview, projectId, projectName, seq,
+          reply - quiet, quiet);
+        const caredAt = reply && !quiet ? Math.max(old?.cared_at ?? 0, s.updatedAt) : (old?.cared_at ?? updatedAt);
         changed.push({ ...s, updatedAt, preview: preview ?? old?.preview ?? null, projectId, projectName, pinned: Boolean(old?.pinned), muted: Boolean(old?.muted), id, deviceId, seq,
-          replies: (old?.replies ?? 0) + reply, readReplies: old?.read_replies ?? 0 });
+          replies: (old?.replies ?? 0) + reply - quiet, readReplies: old?.read_replies ?? 0, quiet: (old?.quiet ?? 0) + quiet, readQuiet: old?.read_quiet ?? 0, caredAt });
       }
       if (complete) {
         const live = this.db.prepare('SELECT id FROM sessions WHERE device_id = ? AND agent_id = ? AND archived = 0').all(deviceId, agentId) as { id: string }[];
@@ -325,12 +293,43 @@ export class Store {
     return changed;
   }
 
-  /** The owner read the conversation up to `replies`; the changed view, or undefined when nothing changed. */
-  markRead(id: string, replies: number): SessionView | undefined {
-    const r = this.db.prepare('SELECT replies, read_replies FROM sessions WHERE id = ?').get(id) as { replies: number; read_replies: number } | undefined;
-    const upTo = Math.min(Math.max(0, Math.floor(replies) || 0), r?.replies ?? 0);
-    if (!r || upTo <= r.read_replies) return undefined;
-    this.db.prepare('UPDATE sessions SET read_replies = ?, seq = ? WHERE id = ?').run(upTo, this.nextSeq(), id);
+  /**
+   * Whether the conversation's latest turn answers another agent's message (one AgentChat brought, marked as such)
+   * rather than the owner's: the owner's own messages (typed there, or sent from the phone) carry no mark. The latest
+   * message the hub knows of decides: the conversation's own, when the hub follows it, or the latest request sent there.
+   * `turnId`: that turn's message instead.
+   */
+  fromAgent(sessionId: string, turnId?: string | null): boolean {
+    const own = (turnId
+      ? this.db.prepare(`SELECT ts, json_extract(data, '$.text') AS text FROM items WHERE session_id = ? AND turn_id = ? AND kind = 'message'
+          AND json_extract(data, '$.role') = 'user' ORDER BY ts LIMIT 1`).get(sessionId, turnId)
+      : this.db.prepare(`SELECT ts, json_extract(data, '$.text') AS text FROM items WHERE session_id = ? AND kind = 'message'
+          AND json_extract(data, '$.role') = 'user' ORDER BY ts DESC LIMIT 1`).get(sessionId)) as { ts: number; text: string | null } | undefined;
+    if (turnId && own) return byAgent(own.text ?? '');
+    const sent = this.db.prepare("SELECT created_at AS ts, text FROM requests WHERE session_id = ? AND op = 'send' ORDER BY created_at DESC LIMIT 1")
+      .get(sessionId) as { ts: number; text: string | null } | undefined;
+    const latest = !own ? sent : !sent ? own : own.ts >= sent.ts ? own : sent;
+    return byAgent(latest?.text ?? '');
+  }
+
+  /** The owner turned to the conversation (sent it something): it has something for them now. */
+  cared(id: string): void {
+    this.db.prepare('UPDATE sessions SET cared_at = ?, seq = ? WHERE id = ?').run(Math.floor(Date.now() / 1000), this.nextSeq(), id);
+  }
+
+  /**
+   * The owner read the conversation up to `replies` (and `quiet`: the agents' own); the changed view, or undefined
+   * when nothing changed.
+   */
+  markRead(id: string, replies: number, quiet?: number): SessionView | undefined {
+    const r = this.db.prepare('SELECT replies, read_replies, quiet, read_quiet FROM sessions WHERE id = ?').get(id) as
+      { replies: number; read_replies: number; quiet: number; read_quiet: number } | undefined;
+    if (!r) return undefined;
+    const upTo = Math.min(Math.max(0, Math.floor(replies) || 0), r.replies);
+    const quietUpTo = Math.min(Math.max(0, Math.floor(quiet ?? 0) || 0), r.quiet);
+    if (upTo <= r.read_replies && quietUpTo <= r.read_quiet) return undefined;
+    this.db.prepare('UPDATE sessions SET read_replies = ?, read_quiet = ?, seq = ? WHERE id = ?')
+      .run(Math.max(upTo, r.read_replies), Math.max(quietUpTo, r.read_quiet), this.nextSeq(), id);
     return this.session(id);
   }
 
@@ -499,65 +498,6 @@ export class Store {
       WHERE i.kind = 'artifact' AND s.archived = 0 ORDER BY i.ts DESC LIMIT ?`).all(limit) as unknown as ItemRow[]).map(toItemView);
   }
 
-  // ---------- requests ----------
-
-  /** Creates a request once; a repeated requestId returns the existing row unchanged. */
-  createRequest(requestId: string, sessionId: string, op: CommandOp, payload: unknown, text: string | null, state: RequestState): { view: RequestView; created: boolean } {
-    const existing = this.request(requestId);
-    if (existing) return { view: existing, created: false };
-    const seq = this.nextSeq();
-    this.db.prepare('INSERT INTO requests(request_id, session_id, op, payload, text, state, created_at, seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(requestId, sessionId, op, JSON.stringify(payload), text, state, Date.now(), seq);
-    return { view: this.request(requestId)!, created: true };
-  }
-
-  updateRequest(requestId: string, state: RequestState, turnId?: string | null, error?: string | null): RequestView | undefined {
-    const old = this.request(requestId);
-    if (!old) return undefined;
-    // A request never leaves a final state, and an identical update is not a change.
-    if (['delivered', 'failed', 'cancelled'].includes(old.state)) return undefined;
-    if (old.state === state && old.turnId === (turnId ?? old.turnId)) return undefined;
-    // A note on a successful request (e.g. desktop_restart) stays once it reaches "delivered".
-    this.db.prepare('UPDATE requests SET state = ?, turn_id = COALESCE(?, turn_id), error = COALESCE(?, error), seq = ? WHERE request_id = ?')
-      .run(state, turnId ?? null, error ?? null, this.nextSeq(), requestId);
-    return this.request(requestId);
-  }
-
-  request(requestId: string): RequestView | undefined {
-    const r = this.db.prepare('SELECT * FROM requests WHERE request_id = ?').get(requestId) as RequestRow | undefined;
-    return r ? toRequestView(r) : undefined;
-  }
-
-  requestPayload(requestId: string): unknown {
-    const r = this.db.prepare('SELECT payload FROM requests WHERE request_id = ?').get(requestId) as { payload: string } | undefined;
-    return r ? JSON.parse(r.payload) : undefined;
-  }
-
-  /** Requests changed after `after`, and every one of the last `recentMs` (the phone keeps none across a reload). */
-  requestsAfter(after: number, recentMs = 0): RequestView[] {
-    return (this.db.prepare('SELECT * FROM requests WHERE seq > ? OR created_at > ? ORDER BY seq').all(after, recentMs ? Date.now() - recentMs : Number.MAX_SAFE_INTEGER) as unknown as RequestRow[])
-      .map(toRequestView);
-  }
-
-  /**
-   * A recent, not yet delivered message with this text (messages queued through Codex, and Claude Code's, carry no request id).
-   * A message with files reaches the conversation as its text followed by the attachment lines.
-   */
-  pendingSendByText(sessionId: string, text: string): RequestView | undefined {
-    const rows = this.db.prepare(`SELECT * FROM requests WHERE session_id = ? AND op = 'send' AND state IN ('pending', 'accepted', 'unknown')
-      AND created_at > ? ORDER BY created_at`).all(sessionId, Date.now() - 30 * 60_000) as unknown as RequestRow[];
-    // Typed into the desktop app, line breaks may come back changed: compare without whitespace.
-    const flat = (s: string) => s.replace(/\s+/g, '');
-    const got = flat(text);
-    const r = rows.find((x) => x.text !== null && (got === flat(x.text)
-      || (x.text === ATTACHMENT_MARK ? got.startsWith(ATTACHMENT_MARK) : got.startsWith(flat(x.text) + ATTACHMENT_MARK))));
-    return r ? toRequestView(r) : undefined;
-  }
-
-  queuedRequests(deviceId: string): RequestView[] {
-    return (this.db.prepare("SELECT * FROM requests WHERE state = 'queued' AND session_id LIKE ? ORDER BY created_at").all(deviceId + ':%') as unknown as RequestRow[]).map(toRequestView);
-  }
-
   // ---------- artifacts ----------
 
   saveArtifact(sha: string, name: string, size: number, mime: string, data: Buffer): void {
@@ -575,19 +515,19 @@ export class Store {
   }
 }
 
+/** A message AgentChat brought from another agent (its forwarding mark), or AgentChat's own note. */
+function byAgent(text: string): boolean {
+  return Boolean(markTag(text)) || /^\s*\[AgentChat /.test(text);
+}
+
 function toSessionView(r: SessionRow): SessionView {
   return { id: r.id, deviceId: r.device_id, agentId: r.agent_id, threadId: r.thread_id, title: r.title, cwd: r.cwd,
     updatedAt: r.updated_at, running: Boolean(r.running), activeTurnId: r.active_turn_id, preview: r.preview,
-    projectId: r.project_id, projectName: r.project_name, pinned: Boolean(r.pinned), muted: Boolean(r.muted), replies: r.replies, readReplies: r.read_replies, seq: r.seq };
+    projectId: r.project_id, projectName: r.project_name, pinned: Boolean(r.pinned), muted: Boolean(r.muted), replies: r.replies, readReplies: r.read_replies,
+    quiet: r.quiet ?? 0, readQuiet: r.read_quiet ?? 0, caredAt: r.cared_at ?? r.updated_at, seq: r.seq };
 }
 
 function toItemView(r: ItemRow): ItemView {
   return { itemId: r.item_id, turnId: r.turn_id, kind: r.kind as Item['kind'], ts: r.ts,
     data: JSON.parse(r.data) as Record<string, unknown>, sessionId: r.session_id, seq: r.seq };
-}
-
-function toRequestView(r: RequestRow): RequestView {
-  const files = r.op === 'send' ? (JSON.parse(r.payload) as Command).files : undefined;
-  return { requestId: r.request_id, sessionId: r.session_id, op: r.op as CommandOp, text: r.text, ...(files?.length ? { files } : {}), state: r.state as RequestState,
-    turnId: r.turn_id, error: r.error, createdAt: r.created_at, seq: r.seq };
 }

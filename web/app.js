@@ -78,6 +78,9 @@ function md(text) {
       .replace(/`([^`\n]+)`/g, '<code>$1</code>')
       .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
       .replace(/^#{1,6} (.+)$/gm, '<b>$1</b>')
+      // Files on the agent's computer that the reply links, brought to the hub with it: the picture shows, a tap opens.
+      .replace(/!\[([^\]\n]*)\]\(\/files\/([0-9a-f]{64})\)/g, '<button class="inline-img" data-sha="$2"><img src="/files/$2" alt="$1" loading="lazy"></button>')
+      .replace(/\[([^\]\n]+)\]\(\/files\/([0-9a-f]{64})\)/g, '<a class="link" href="/files/$2" data-sha="$2">$1</a>')
       .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
       .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
   }).join('');
@@ -112,14 +115,14 @@ function friendName(deviceId, agentId) {
 const isFriend = (s) => state.friends.get(friendKey(s))?.added === true;
 // Lists show the last month; older conversations stay reachable through search.
 const RECENT_S = 30 * 86_400;
-const isRecent = (s) => s.pinned || s.running || s.id === state.current || Date.now() / 1000 - s.updatedAt < RECENT_S || isUnread(s);
+const isRecent = (s) => s.pinned || s.running || s.id === state.current || Date.now() / 1000 - s.updatedAt < RECENT_S || isUnread(s) || quietCount(s) > 0;
 /** A conversation agents keep only for passing work to each other: never listed (its approvals still reach the owner). */
 const isChannel = (s) => /^(AgentChat|AllinOne) 协作/.test(s.title); // AllinOne: the old name
 const visibleSessions = () => [...state.sessions.values()].filter((s) => isFriend(s) && isRecent(s) && !isChannel(s));
 
 /**
  * The friend's picture (the owner's own, kept on the hub) or its first letter. `count`: unread replies, a red number;
- * `quiet` (消息免打扰): a grey dot instead. `profile`: tapping it opens the friend's page.
+ * `quiet` (消息免打扰, or only the agents' own replies): a grey dot instead. `profile`: tapping it opens the friend's page.
  */
 function avatar(deviceId, agentId, small = false, count = 0, quiet = false, profile = false) {
   let h = 0;
@@ -140,12 +143,20 @@ function unreadCount(s) {
   return Math.max(0, (s.replies ?? 0) - (s.readReplies ?? s.replies ?? 0));
 }
 const isUnread = (s) => unreadCount(s) > 0;
+/** New replies to other agents' messages (the agents working among themselves): shown as a grey dot, never counted red. */
+function quietCount(s) {
+  if (s.id === state.current) return 0;
+  return Math.max(0, (s.quiet ?? 0) - (s.readQuiet ?? s.quiet ?? 0));
+}
+/** The list's order: when the conversation last had something for the owner (the agents' own talk does not move it). */
+const caredAt = (s) => s.caredAt ?? s.updatedAt;
 
 function markRead(s) {
   if (!s) return;
-  if ((s.readReplies ?? 0) < (s.replies ?? 0)) {
+  if ((s.readReplies ?? 0) < (s.replies ?? 0) || (s.readQuiet ?? 0) < (s.quiet ?? 0)) {
     s.readReplies = s.replies;
-    send({ t: 'read', sessionId: s.id, replies: s.replies });
+    s.readQuiet = s.quiet;
+    send({ t: 'read', sessionId: s.id, replies: s.replies ?? 0, quiet: s.quiet ?? 0 });
   }
   native?.markRead?.(s.id); // clears its notification, and with it the app-icon count
 }
@@ -297,7 +308,7 @@ function track(item) {
   if (item.kind === 'approval_request') {
     if (item.data.state === 'pending') state.approvals.set(key, item);
     else state.approvals.delete(key);
-  } else if (item.kind === 'artifact') {
+  } else if (item.kind === 'artifact' && !isWorkFile(item)) {
     state.artifacts.set(key, item);
   }
 }
@@ -515,15 +526,17 @@ $('projects').addEventListener('click', (e) => {
 const CHAT_ROWS = 200;
 
 function renderChats() {
-  const list = visibleSessions().sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt).slice(0, CHAT_ROWS);
+  const list = visibleSessions().sort((a, b) => Number(b.pinned) - Number(a.pinned) || caredAt(b) - caredAt(a)).slice(0, CHAT_ROWS);
   $('chats').innerHTML = list.map((s) => {
     const unread = unreadCount(s);
-    const quiet = isMuted(s);
+    const muted = isMuted(s);
+    // Red: replies to the owner. Grey: muted, or only the agents working among themselves (to keep an eye on, quietly).
+    const count = unread || quietCount(s);
     return `<button class="friend${s.id === state.current ? ' active' : ''}${s.id === state.landed ? ' landed' : ''}" data-open="${esc(s.id)}" role="listitem">
-      ${avatar(s.deviceId, s.agentId, false, unread, quiet)}
+      ${avatar(s.deviceId, s.agentId, false, count, muted || !unread)}
       <span class="body"><div class="name">${esc(s.title)}</div>
         <div class="preview">${s.running ? '<span class="dot run"></span>' : ''}<span>${esc(friendName(s.deviceId, s.agentId))} · ${esc(projectLabel(s))}</span></div></span>
-      <span class="time">${s.pinned ? '<div class="fmeta">置顶</div>' : ''}${when(s.updatedAt)}${quiet ? '<div class="muted-mark" title="消息免打扰">🔕</div>' : ''}</span></button>`;
+      <span class="time">${s.pinned ? '<div class="fmeta">置顶</div>' : ''}${when(caredAt(s))}${muted ? '<div class="muted-mark" title="消息免打扰">🔕</div>' : ''}</span></button>`;
   }).join('') || '<div class="empty-note">还没有对话。到「通讯录」里添加电脑上的 Agent 后，它的对话会按时间出现在这里。</div>';
 }
 
@@ -646,7 +659,7 @@ function renderHeader() {
   $('chat-friend').textContent = friendName(s.deviceId, s.agentId);
   $('chat-thread-name').textContent = s.title + (device && !device.online ? ' · 设备离线' : s.running ? ' · 运行中' : '');
   $('stop').hidden = !s.running;
-  const files = sortedItems(s.id).filter((i) => i.kind === 'artifact').length;
+  const files = sortedItems(s.id).filter((i) => i.kind === 'artifact' && !isWorkFile(i)).length;
   $('files-btn').textContent = files ? `文件 ${files}` : '文件';
   updateSend();
 }
@@ -718,6 +731,7 @@ function renderMessages(jump) {
         else if (text) html += `<div class="row mine"><div class="bubble">${esc(text)}</div></div>`;
       } else html += `<div class="row">${them}<div class="bubble">${md(item.data.text)}</div></div>`;
     } else if (item.kind === 'artifact') {
+      if (item.itemId.startsWith('link:') || isWorkFile(item)) continue; // shown in the reply that links it; or not the owner's
       html += item.data.sent ? `<div class="row mine">${fileCard(item)}</div>` : `<div class="row">${them}${fileCard(item)}</div>`;
     } else if (item.kind === 'approval_request') {
       html += `<div class="row">${them}${approvalHtml(item)}</div>`;
@@ -729,14 +743,6 @@ function renderMessages(jump) {
   }
   flush();
   place(Infinity);
-  // Sent while the computer was locked: the desktop app shows these only after it restarts.
-  if ([...state.requests.values()].some((r) => r.sessionId === sid && r.error === 'desktop_restart' && Date.now() - r.createdAt < 7 * 86_400_000)) {
-    html += '<div class="notice soft">电脑锁屏时发的消息走了后台方式。回到电脑后，请先重启 Claude 桌面端，再继续这个对话，否则电脑上看不到这些内容。</div>';
-  }
-  // Sent in the background (someone was using the computer): Goose shows these only after it restarts.
-  if ([...state.requests.values()].some((r) => r.sessionId === sid && r.error === 'goose_background' && Date.now() - r.createdAt < 7 * 86_400_000)) {
-    html += '<div class="notice soft">从手机发的消息，电脑上的 Goose 窗口要关掉重新打开才显示出来。在电脑上直接接着聊也没问题，Goose 记得手机上聊过的内容。</div>';
-  }
   for (const [itemId, d] of state.deltas) {
     if (d.sessionId === sid && !known.has(itemId)) html += `<div class="row">${them}<div class="bubble streaming">${md(d.text)}</div></div>`;
   }
@@ -748,14 +754,15 @@ function renderMessages(jump) {
 function agentOrigin(text) {
   // 「[来自 X「对话」，经 AgentChat 转发]」 hands work over; 「[来自 X「对话」的汇报，…]」 brings its outcome back.
   // AllinOne: what AgentChat was called before; older messages carry that name.
-  const m = /^\[来自 (.+?)(?:「(.+?)」)?(的汇报)?，经 (?:AgentChat|AllinOne) 转发\] ?([\s\S]*)$/.exec(text || '');
+  // The tag after 转发 (#1a2b3c4d) tells the hub which request it is; nothing for the owner to read.
+  const m = /^\[来自 (.+?)(?:「(.+?)」)?(的汇报)?，经 (?:AgentChat|AllinOne) 转发(?:给「[^」]*」)?(?: #[0-9a-f]+)?\] ?([\s\S]*)$/.exec(text || '');
   if (!m) return null;
   // The sender's conversation, to jump back to: same title, same computer · agent.
   const from = m[2] ? [...state.sessions.values()].find((s) => s.title.startsWith(m[2]) && `${deviceName(s.deviceId)} · ${agentLabel(s.deviceId, s.agentId)}` === m[1]) : null;
   return { who: m[3] ? `${m[1]} 的汇报` : m[1], conv: m[2] || null, from: from?.id || null, body: m[4], report: Boolean(m[3]) };
 }
 
-const HANDOFF_STATE = { running: ['进行中', ''], queued: ['等对方上线', ''], waiting_approval: ['等你审批', 'warn'], done: ['已完成', 'ok'],
+const HANDOFF_STATE = { running: ['进行中', ''], queued: ['等对方上线', ''], waiting_window: ['排队中，等对方做完上一轮', ''], waiting_approval: ['等你审批', 'warn'], done: ['已完成', 'ok'],
   failed: ['失败', 'bad'], interrupted: ['已停止', 'bad'] };
 
 /**
@@ -795,20 +802,27 @@ function handoffHtml(item) {
     <div class="what">${esc(d.text)}</div>${why}${asks}${reply}${go}</div>`;
 }
 
+/** On its way (as in WeChat): a small circle turning beside the message until it is there; then the message stands alone. */
+const SENDING = new Set(['pending', 'accepted', 'queued']);
+const spinner = '<span class="sending" role="img" aria-label="发送中"></span>';
+
 function requestHtml(r) {
   const from = agentOrigin(r.text);
   if (from) {
-    return `<div class="row from-agent"><div class="who">${esc(from.who)}</div><div class="bubble">${esc(from.body)}</div>
-      <div class="state">${REQ_STATE[r.state] || r.state}</div></div>`;
+    return `<div class="row from-agent"><div class="who">${esc(from.who)}</div><div class="sendline">${SENDING.has(r.state) ? spinner : ''}<div class="bubble">${esc(from.body)}</div></div>
+      ${SENDING.has(r.state) ? '' : `<div class="state">${REQ_STATE[r.state] || r.state}</div>`}</div>`;
   }
   const bad = r.state === 'failed' || r.state === 'unknown';
   const reason = r.error ? (REQ_ERRORS.find(([re]) => re.test(r.error))?.[1] ?? '出错了') : '';
-  const extra = r.state === 'queued' ? ` · <button class="link" data-cancel="${esc(r.requestId)}">取消</button>` : '';
+  // Plain sending needs no words; waiting for the computer's window says why, and can be called off.
+  const words = r.state === 'pending' || r.state === 'accepted' ? ''
+    : `${REQ_STATE[r.state] || r.state}${reason ? ' · ' + esc(reason) : ''}${r.state === 'queued' ? ` · <button class="link" data-cancel="${esc(r.requestId)}">取消</button>` : ''}`;
   const text = r.text === MARK ? '' : r.text;
   // Once the hub has them, the files show as the conversation's own items; until then, from the request.
   const files = (r.files || []).filter((f, i) => !state.items.get(r.sessionId)?.has(`sent:${r.requestId}:${i}`));
-  return `<div class="row mine req">${files.length ? sentFilesHtml(files) : ''}${text ? `<div class="bubble">${esc(text)}</div>` : ''}
-    <div class="state${bad ? ' bad' : ''}" title="${esc(r.error || '')}">${REQ_STATE[r.state] || r.state}${reason ? ' · ' + esc(reason) : ''}${extra}</div></div>`;
+  const turning = SENDING.has(r.state) ? spinner : '';
+  return `<div class="row mine req">${files.length ? `<div class="sendline">${text ? '' : turning}${sentFilesHtml(files)}</div>` : ''}${text ? `<div class="sendline">${turning}<div class="bubble">${esc(text)}</div></div>` : ''}
+    ${words ? `<div class="state${bad ? ' bad' : ''}" title="${esc(r.error || '')}">${words}</div>` : ''}</div>`;
 }
 
 function toolHtml(t) {
@@ -824,9 +838,20 @@ function fileKind(mime, name) {
   if (mime.startsWith('image/')) return 'img';
   if (mime === 'application/pdf') return 'pdf';
   const ext = (name.split('.').pop() || '').toLowerCase();
+  if (mime.startsWith('video/') || ['mp4', 'webm', 'mov', 'm4v', 'mkv'].includes(ext)) return 'video';
+  if (mime.startsWith('audio/') || ['mp3', 'wav', 'm4a', 'aac', 'ogg', 'oga', 'flac', 'opus'].includes(ext)) return 'audio';
   if (['doc', 'docx', 'md', 'txt', 'rtf', 'ppt', 'pptx', 'xls', 'xlsx', 'csv'].includes(ext)) return 'doc';
-  if (['js', 'ts', 'py', 'ps1', 'cmd', 'bat', 'json', 'java', 'cs', 'go', 'rs', 'html', 'css', 'sh', 'sql', 'toml', 'yaml', 'yml'].includes(ext)) return 'code';
+  if (['js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx', 'py', 'ps1', 'psm1', 'cmd', 'bat', 'vbs', 'json', 'jsonl', 'java', 'cs', 'go', 'rs', 'html', 'htm', 'css',
+    'sh', 'sql', 'toml', 'yaml', 'yml', 'ini', 'xml', 'log'].includes(ext)) return 'code';
   return 'other';
+}
+
+/**
+ * Program code and the like an agent wrote while working: not shown as one of its results (the computer no longer
+ * sends them; this hides the ones from before). A file the agent links in its reply, or the owner sent, always shows.
+ */
+function isWorkFile(item) {
+  return fileKind(item.data.mime, item.data.name) === 'code' && !String(item.itemId).startsWith('link:') && !item.data.sent;
 }
 
 function ficon(item) {
@@ -935,6 +960,14 @@ document.addEventListener('click', (e) => {
   }
   const file = t.closest('[data-file]');
   if (file) return openFile(itemByKey(file.dataset.file), $('side').contains(file) ? 'side' : 'chat');
+  const linked = t.closest('[data-sha]');
+  if (linked && state.current) {
+    const item = sortedItems(state.current).find((i) => i.kind === 'artifact' && i.data.sha256 === linked.dataset.sha);
+    if (item) {
+      e.preventDefault();
+      return openFile(item, 'chat');
+    }
+  }
   const option = t.closest('[data-qkey]');
   if (option) {
     if (option.dataset.single) return answerQuestion(option, { [option.dataset.qkey]: option.dataset.qvalue });
@@ -1243,7 +1276,7 @@ function renderWork() {
 
 // ---------- results (all output files) ----------
 
-const FILTERS = [['all', '全部'], ['img', '图片'], ['doc', '文档'], ['pdf', 'PDF'], ['code', '代码'], ['other', '其他']];
+const FILTERS = [['all', '全部'], ['img', '图片'], ['video', '视频'], ['audio', '音频'], ['doc', '文档'], ['pdf', 'PDF'], ['code', '代码'], ['other', '其他']];
 
 /**
  * One library view, used by the 资料库 page (all conversations) and by each conversation's own library.
@@ -1293,6 +1326,112 @@ $('files-filter').addEventListener('click', (e) => {
 $('files-q').addEventListener('input', (e) => {
   state.filesQuery = e.target.value.trim();
   renderFilesTab();
+});
+
+// ---------- 网盘: the folder shared to every computer with Tailscale (Taildrive), opened through the hub ----------
+
+const drive = { path: [], entries: null, error: '', computer: '' };
+const drivePathParam = (parts) => encodeURIComponent('/' + parts.join('/'));
+
+async function loadDrive() {
+  drive.error = '';
+  try {
+    const res = await fetch(`/api/drive/list?path=${drivePathParam(drive.path)}`);
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || '打不开网盘');
+    [drive.entries, drive.computer] = [body.entries, body.computer];
+  } catch (e) {
+    [drive.entries, drive.error] = [null, e.message];
+  }
+  renderDrive();
+}
+
+/** A file of the drive as the preview takes it (a chat file has the same shape, from /files/). */
+function driveItem(entry) {
+  const path = [...drive.path, entry.name];
+  return { sessionId: null, itemId: `drive:${path.join('/')}`, ts: entry.mtime,
+    data: { name: entry.name, mime: entry.mime, size: entry.size, url: `/api/drive/file?path=${drivePathParam(path)}` } };
+}
+
+function renderDrive() {
+  const crumbs = [`<button data-drive-to="0">网盘${drive.computer ? `（${esc(drive.computer)}）` : ''}</button>`,
+    ...drive.path.map((p, i) => `<span>›</span><button data-drive-to="${i + 1}">${esc(p)}</button>`)];
+  $('drive-crumbs').innerHTML = crumbs.join('');
+  if (drive.error) return void ($('drive').innerHTML = `<div class="empty-note">${esc(drive.error)}</div>`);
+  if (!drive.entries) return void ($('drive').innerHTML = '<div class="empty-note">正在打开…</div>');
+  if (!drive.entries.length) return void ($('drive').innerHTML = '<div class="empty-note">这个文件夹是空的</div>');
+  $('drive').innerHTML = drive.entries.map((e, i) => {
+    const icon = e.dir ? '<span class="ficon folder">📁</span>' : ficon(driveItem(e));
+    const meta = e.dir ? '文件夹' : size(e.size);
+    return `<div class="item drive-row"><button class="drive-open" data-drive-i="${i}">${icon}<span class="t"><b>${esc(e.name)}</b><span>${meta}</span></span>
+      <span class="side">${e.mtime ? esc(when(e.mtime / 1000)) : ''}</span></button><button class="drive-del" data-drive-del="${i}" aria-label="删除">×</button></div>`;
+  }).join('');
+}
+
+function showLib(mode) {
+  state.libMode = mode;
+  for (const b of $('lib-tabs').querySelectorAll('[data-lib]')) b.classList.toggle('on', b.dataset.lib === mode);
+  for (const el of document.querySelectorAll('.lib-chat')) el.hidden = mode !== 'chat';
+  for (const el of document.querySelectorAll('.lib-drive')) el.hidden = mode !== 'drive';
+  if (mode === 'drive') {
+    renderDrive();
+    void loadDrive();
+  }
+}
+
+$('lib-tabs').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-lib]');
+  if (b) showLib(b.dataset.lib);
+});
+
+$('drive-crumbs').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-drive-to]');
+  if (!b) return;
+  drive.path = drive.path.slice(0, Number(b.dataset.driveTo));
+  drive.entries = null;
+  void loadDrive();
+});
+
+$('drive').addEventListener('click', async (e) => {
+  const del = e.target.closest('[data-drive-del]');
+  if (del) {
+    const entry = drive.entries?.[Number(del.dataset.driveDel)];
+    if (!entry || !confirm(`从网盘删除「${entry.name}」${entry.dir ? '和里面的所有文件' : ''}？各台电脑上都会没有，不能恢复。`)) return;
+    const res = await fetch(`/api/drive/file?path=${drivePathParam([...drive.path, entry.name])}`, { method: 'DELETE' });
+    toast(res.ok ? '已删除' : (await res.json().catch(() => ({}))).error || '删除没有成功');
+    return void loadDrive();
+  }
+  const open = e.target.closest('[data-drive-i]');
+  const entry = open && drive.entries?.[Number(open.dataset.driveI)];
+  if (!entry) return;
+  if (entry.dir) {
+    drive.path = [...drive.path, entry.name];
+    drive.entries = null;
+    return void loadDrive();
+  }
+  openFile(driveItem(entry), 'side');
+});
+
+$('drive-mkdir').addEventListener('click', async () => {
+  const name = (prompt('新文件夹的名字') || '').trim();
+  if (!name) return;
+  if (/[\\/]/.test(name)) return toast('名字里不能有斜杠');
+  const res = await fetch(`/api/drive/mkdir?path=${drivePathParam([...drive.path, name])}`, { method: 'POST' });
+  toast(res.ok ? '已新建' : (await res.json().catch(() => ({}))).error || '没有成功');
+  void loadDrive();
+});
+
+$('drive-upload').addEventListener('click', () => $('drive-input').click());
+$('drive-input').addEventListener('change', async (e) => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  for (const [i, f] of files.entries()) {
+    toast(`正在上传 ${i + 1}/${files.length}：${f.name}`);
+    const res = await fetch(`/api/drive/file?path=${drivePathParam([...drive.path, f.name])}`, { method: 'PUT', body: f });
+    if (!res.ok) toast(`「${f.name}」没有传上去：${(await res.json().catch(() => ({}))).error || res.status}`);
+  }
+  if (files.length) toast('上传完了');
+  void loadDrive();
 });
 
 // ---------- friend profile and settings (shown in the right pane) ----------
@@ -1454,16 +1593,20 @@ function renderRight() {
     const a = r.item;
     $('right-title').textContent = a.data.name;
     clearTabs(r.from === 'chat' && state.current ? '1' : '');
-    $('right-open').hidden = r.from !== 'side' || a.sessionId === state.current;
+    $('right-open').hidden = r.from !== 'side' || !a.sessionId || a.sessionId === state.current;
     $('right-open').dataset.open = a.sessionId;
     const body = $('right-body');
-    if (body.dataset.sha === a.data.sha256) return;
-    body.dataset.sha = a.data.sha256;
-    const url = `/files/${a.data.sha256}`;
+    const url = fileUrl(a);
+    if (body.dataset.sha === url) return;
+    body.dataset.sha = url;
     const kind = fileKind(a.data.mime, a.data.name);
-    if (kind === 'img') body.innerHTML = `<div class="pview"><img src="${url}" alt="${esc(a.data.name)}"></div>`;
-    else if (kind === 'pdf' || a.data.mime.startsWith('text/') || a.data.mime === 'application/json') body.innerHTML = `<div class="pview"><iframe src="${url}" title="${esc(a.data.name)}"></iframe></div>`;
-    else body.innerHTML = `<div class="pview"><div class="hint">无法直接预览<br><a class="link" href="${url}" download="${esc(a.data.name)}">下载 ${esc(a.data.name)}（${size(a.data.size)}）</a></div></div>`;
+    // Under every file: keep it on the phone, or hand it to another app.
+    const actions = `<div class="pactions">${fileActions()}</div>`;
+    if (kind === 'img') body.innerHTML = `<div class="pview"><button class="pimg" data-viewer><img src="${url}" alt="${esc(a.data.name)}"></button></div>${actions}`;
+    else if (kind === 'video') body.innerHTML = `<div class="pview"><video src="${url}" controls playsinline preload="metadata"></video></div>${actions}`;
+    else if (kind === 'audio') body.innerHTML = `<div class="pview"><div class="paudio"><span class="ficon audio">${esc((a.data.name.split('.').pop() || '').slice(0, 4).toUpperCase())}</span><b>${esc(a.data.name)}</b><audio src="${url}" controls preload="metadata"></audio></div></div>${actions}`;
+    else if (kind === 'pdf' || a.data.mime.startsWith('text/') || a.data.mime === 'application/json') body.innerHTML = `<div class="pview"><iframe src="${url}" title="${esc(a.data.name)}"></iframe></div>${actions}`;
+    else body.innerHTML = `<div class="pview"><div class="hint">无法直接预览<br><a class="link" href="${url}" download="${esc(a.data.name)}">下载 ${esc(a.data.name)}（${size(a.data.size)}）</a></div></div>${actions}`;
     return;
   }
   delete $('right-body').dataset.sha;
@@ -1478,7 +1621,7 @@ function renderRight() {
     return;
   }
   // A conversation: its own library, with the same kinds as the 资料库 page.
-  const files = sortedItems(s.id).filter((i) => i.kind === 'artifact');
+  const files = sortedItems(s.id).filter((i) => i.kind === 'artifact' && !isWorkFile(i));
   const lib = libraryHtml(files, r.filter || 'all', r.q || '', false);
   $('right-title').textContent = files.length ? `资料库 · ${files.length}` : '资料库';
   // Keep the search box (and the keyboard) while the list below refreshes.
@@ -1637,17 +1780,159 @@ const GLYPHS = {
 };
 const calm = (glyph, title, sub) => `<div class="calm"><span class="glyph" style="--i:${GLYPHS[glyph]}"></span><b>${esc(title)}</b><span>${esc(sub)}</span></div>`;
 
-/** PDFs and files the WebView cannot show are handed to the phone's own viewer. */
+/** PDFs and files the page cannot show are handed to the phone's own viewer; pictures, videos and sounds play here. */
 function openNatively(item) {
   if (!native) return false;
   const kind = fileKind(item.data.mime, item.data.name);
-  if (kind === 'img' || item.data.mime.startsWith('text/')) return false;
-  native.openFile(`${location.origin}/files/${item.data.sha256}`, item.data.name, item.data.mime);
+  if (['img', 'video', 'audio'].includes(kind) || item.data.mime.startsWith('text/')) return false;
+  native.openFile(`${location.origin}${fileUrl(item)}`, item.data.name, item.data.mime);
   return true;
+}
+
+/** Save (to the phone's gallery or downloads), share with another app, open in another app: the app's own; a browser downloads. */
+function fileActions() {
+  return native?.saveFile
+    ? '<button data-fa="save">保存到手机</button><button data-fa="share">分享</button><button data-fa="other">用其他应用打开</button>'
+    : '<button data-fa="save">下载</button>';
+}
+
+function fileAction(what, item) {
+  if (!item) return;
+  const url = `${location.origin}${fileUrl(item)}`;
+  if (what === 'save' && native?.saveFile) return native.saveFile(url, item.data.name, item.data.mime);
+  if (what === 'share') return native?.shareFile?.(url, item.data.name, item.data.mime);
+  if (what === 'other') return native?.openFile?.(url, item.data.name, item.data.mime);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = item.data.name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
+/**
+ * A picture full screen: two fingers (or the wheel) zoom in where they are, one finger moves it about, a double tap
+ * zooms in and back; turned a quarter at a time; kept on the phone or shared. The picture is the original file, so
+ * zooming in shows all of its detail. Turning the phone turns the screen while it is open (even with rotation locked).
+ */
+const viewer = (() => {
+  const el = document.createElement('div');
+  el.id = 'viewer';
+  el.hidden = true;
+  el.innerHTML = `<div class="vstage"><img alt=""></div>
+    <div class="vbar"><button data-v="close" aria-label="关闭">✕</button><span class="vname"></span>
+    <button data-v="rotate">旋转</button><button data-fa="save">${native?.saveFile ? '保存' : '下载'}</button>${native?.shareFile ? '<button data-fa="share">分享</button>' : ''}</div>`;
+  document.body.append(el);
+  const stage = el.querySelector('.vstage');
+  const img = el.querySelector('img');
+  let item = null;
+  let s = 1, x = 0, y = 0, turn = 0;
+  const pts = new Map();
+  let from = null; // the gesture's start: scale, offset, the fingers' middle and spread
+  let tapAt = 0;
+  const apply = () => {
+    img.style.transform = `translate(${x}px, ${y}px) scale(${s}) rotate(${turn * 90}deg)`;
+    img.classList.toggle('turned', turn % 2 === 1);
+  };
+  const center = () => {
+    const r = stage.getBoundingClientRect();
+    return { cx: r.left + r.width / 2, cy: r.top + r.height / 2 };
+  };
+  /** Zoom to `to` keeping the picture's point under (px, py) where it is. */
+  const zoomAt = (to, px, py, base = { s, x, y }) => {
+    const { cx, cy } = center();
+    const k = Math.min(12, Math.max(1, to)) / base.s;
+    s = base.s * k;
+    x = px - cx - (px - cx - base.x) * k;
+    y = py - cy - (py - cy - base.y) * k;
+    if (s === 1) x = y = 0;
+    apply();
+  };
+  const fingers = () => {
+    const p = [...pts.values()];
+    if (p.length < 2) return { mx: p[0].x, my: p[0].y, d: 0 };
+    return { mx: (p[0].x + p[1].x) / 2, my: (p[0].y + p[1].y) / 2, d: Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y) };
+  };
+  stage.addEventListener('pointerdown', (e) => {
+    stage.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    from = { s, x, y, ...fingers() };
+    if (pts.size === 1) {
+      if (Date.now() - tapAt < 300) {
+        zoomAt(s > 1.05 ? 1 : 2.5, e.clientX, e.clientY);
+        tapAt = 0;
+      } else tapAt = Date.now();
+    }
+  });
+  stage.addEventListener('pointermove', (e) => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const f = fingers();
+    if (pts.size >= 2 && from.d) {
+      zoomAt(from.s * (f.d / from.d), from.mx, from.my, { s: from.s, x: from.x, y: from.y });
+      x += f.mx - from.mx;
+      y += f.my - from.my;
+      apply();
+    } else if (pts.size === 1 && s > 1) {
+      x = from.x + f.mx - from.mx;
+      y = from.y + f.my - from.my;
+      apply();
+    }
+  });
+  const lift = (e) => {
+    pts.delete(e.pointerId);
+    if (pts.size) from = { s, x, y, ...fingers() };
+  };
+  stage.addEventListener('pointerup', lift);
+  stage.addEventListener('pointercancel', lift);
+  stage.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    zoomAt(s * Math.exp(-e.deltaY / 400), e.clientX, e.clientY);
+  }, { passive: false });
+  const close = () => {
+    el.hidden = true;
+    img.removeAttribute('src');
+    native?.viewerOpen?.(false);
+  };
+  el.querySelector('.vbar').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.v === 'close') return close();
+    if (b.dataset.v === 'rotate') {
+      turn = (turn + 1) % 4;
+      s = 1;
+      x = y = 0;
+      return apply();
+    }
+    if (b.dataset.fa) fileAction(b.dataset.fa, item);
+  });
+  return {
+    open(it) {
+      item = it;
+      s = 1;
+      x = y = turn = 0;
+      apply();
+      img.src = fileUrl(it);
+      el.querySelector('.vname').textContent = it.data.name;
+      el.hidden = false;
+      native?.viewerOpen?.(true);
+    },
+    close,
+    get open_() {
+      return !el.hidden;
+    },
+  };
+})();
+
+/** Where a file is read: a chat file by its hash, a file of the 网盘 by its own address. */
+function fileUrl(item) {
+  return item.data.url ?? `/files/${item.data.sha256}`;
 }
 
 function openFile(item, from) {
   if (!item) return;
+  // A picture opens full screen, to zoom into; on a wide screen beside the chat too.
+  if (fileKind(item.data.mime, item.data.name) === 'img' && !trifold()) return viewer.open(item);
   if (openNatively(item)) return;
   state.right = { ...state.right, mode: 'preview', item, from };
   if (trifold()) layout.show('right');
@@ -1657,6 +1942,10 @@ function openFile(item, from) {
 
 // The conversation library's kind chips and search box.
 $('right').addEventListener('click', (e) => {
+  // The previewed file: its picture full screen, or kept / shared.
+  if (e.target.closest('[data-viewer]') && state.right.item) return viewer.open(state.right.item);
+  const fa = e.target.closest('.pactions [data-fa]');
+  if (fa) return fileAction(fa.dataset.fa, state.right.item);
   const chip = e.target.closest('#right-chips [data-filter]');
   if (!chip) return;
   state.right.filter = chip.dataset.filter;
@@ -1722,6 +2011,7 @@ if (!native && /Android/i.test(navigator.userAgent)) $('install').hidden = false
 // Voice input is the phone keyboard's own microphone key; the app adds no button of its own.
 if (native) {
   window.onNativeBack = () => {
+    if (viewer.open_) return viewer.close(), true;
     if (!$('sheet').hidden) return ($('sheet').hidden = true), true;
     const view = $('app').dataset.view;
     if (view === 'right') return $('right-back').click(), true;
