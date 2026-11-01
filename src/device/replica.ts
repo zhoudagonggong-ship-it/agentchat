@@ -9,6 +9,7 @@ import { log, sha256 } from '../shared/util.ts';
 
 const FILES_EVERY_MS = 10 * 60_000;
 const FILES_AT_ONCE = 4;
+const COMPACT_OVER = 16 * 1024 * 1024;
 
 export class ReplicaSink {
   private db: DatabaseSync | null = null;
@@ -96,6 +97,10 @@ export class ReplicaSink {
   /** Too far behind: take the whole copy, then go on from it. */
   async snapshot(epoch: string, n: number, url: string): Promise<void> {
     if (this.closed) return;
+    // One copy at a time: asked again (the link dropped and came back, say), the one under way goes on. Two at once
+    // wrote into the same file, spoiled each other and began again for ever on a slow line.
+    if (this.taking) return log('replica', 'asked for a copy while one is coming: that one goes on');
+    this.taking = true;
     const part = join(this.dir, 'incoming.sqlite');
     try {
       await takeOver(url, part);
@@ -113,10 +118,13 @@ export class ReplicaSink {
     } catch (e) {
       rmSync(part, { force: true });
       log('replica', `could not take a copy: ${(e as Error).message}`);
+    } finally {
+      this.taking = false;
     }
     this.send(this.epoch, this.n);
     void this.fetchFiles();
   }
+  private taking = false;
 
   /** Files the record names that are not here yet, one at a time, each checked by its hash. */
   private fetchFiles(): Promise<void> {
@@ -124,8 +132,17 @@ export class ReplicaSink {
     this.fetching ??= (async () => {
       try {
         // One kept from this computer's own time as hub is there already: taking over finds it in place.
+        const named = new Set(((this.db?.prepare('SELECT sha256 FROM artifacts').all() ?? []) as { sha256: string }[]).map((r) => r.sha256));
+        // The hub let them go with their history: so does the copy (and gives the room back to the disk).
+        if (this.db && named.size) {
+          let dropped = 0;
+          for (const f of readdirSync(this.files)) if (!named.has(f) && !f.endsWith('.tmp')) { rmSync(join(this.files, f), { force: true }); dropped++; }
+          if (dropped) log('replica', `${dropped} files the hub let go removed from the copy`);
+          const page = (this.db.prepare('PRAGMA page_size').get() as { page_size: number }).page_size;
+          if ((this.db.prepare('PRAGMA freelist_count').get() as { freelist_count: number }).freelist_count * page > COMPACT_OVER) this.db.exec('VACUUM');
+        }
         const have = new Set([...readdirSync(this.files), ...(existsSync(this.own) ? readdirSync(this.own) : [])]);
-        const want = ((this.db?.prepare('SELECT sha256 FROM artifacts').all() ?? []) as { sha256: string }[]).map((r) => r.sha256).filter((s) => !have.has(s));
+        const want = [...named].filter((s) => !have.has(s));
         let got = 0;
         const put = (sha: string, data: Buffer) => {
           writeFileSync(join(this.files, sha + '.tmp'), data);

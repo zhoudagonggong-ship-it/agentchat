@@ -4,7 +4,7 @@
 import { execFile } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, watch, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { promisify } from 'node:util';
 import type { Adapter, AdapterSink } from '../device.ts';
@@ -54,7 +54,7 @@ interface Question { key: string; title: string; description: string; options: {
 interface Ask {
   data: Record<string, unknown>;
   /** The JSON-RPC result for an answer; `answers` only for question cards. */
-  respond(decision: 'accept' | 'decline', answers?: Record<string, string>): unknown;
+  respond(decision: 'accept' | 'acceptForSession' | 'decline', answers?: Record<string, string>): unknown;
   /** Nobody answered in time. */
   expire: unknown;
 }
@@ -130,33 +130,55 @@ export class CodexAdapter implements Adapter {
   private refreshAgain = false;
   private approvalSeq = 0;
   private readonly scheduleRefresh = debounce(() => void this.refresh(), 800, 2000); // read even while a run writes on
-  /** Nothing of ours running any more: close our app-server, which is what really hands conversations back. */
-  private readonly recycleSoon = debounce(() => {
-    if (this.activeTurn.size || this.approvals.size || !this.held) return;
-    this.held = false;
-    this.loaded.clear();
-    this.rpc.recycle();
-    log('codex', 'handed the conversations back to the Codex app (restarted our app-server)');
-    this.scheduleRefresh(); // a read cut off by the restart is done again
-  }, 5000);
-  private held = false; // our app-server ran a turn since it started
 
   constructor(exe: string, pidFile: string | null = null, home = process.env.CODEX_HOME ?? join(homedir(), '.codex')) {
     this.exe = exe;
     this.home = home;
+    this.pidDir = pidFile ? dirname(pidFile) : null;
     this.rpc = new CodexRpc(exe, {
       notification: (method, params) => this.onNotification(method, params),
       request: (method, params, id) => this.onServerRequest(method, params, id),
+      restarted: () => this.scheduleRefresh(),
+    }, pidFile);
+  }
+
+  /**
+   * Each conversation we write to (a message, a stop, an approval's answer) gets an app-server of its own: Codex keeps a
+   * conversation it ran a turn in to the app-server that ran it until that one exits ("已在另一个应用中打开" in the
+   * desktop app), so one shared app-server would keep every conversation we touched while any of them still worked.
+   * This way each goes back to the desktop app as soon as its own turn is over. Reading goes through the shared one.
+   */
+  private readonly writers = new Map<string, CodexRpc>();
+  private readonly pidDir: string | null;
+
+  private writer(threadId: string, rpc?: CodexRpc): CodexRpc {
+    let w = this.writers.get(threadId);
+    if (rpc) this.writers.set(threadId, (w = rpc));
+    if (!w) this.writers.set(threadId, (w = this.newWriter(`codex-writer-${threadId.replace(/[^\w-]/g, '')}.pid`, threadId)));
+    return w;
+  }
+
+  private newWriter(pidName: string, threadId?: string): CodexRpc {
+    return new CodexRpc(this.exe, {
+      notification: (method, params) => this.onNotification(method, params),
+      request: (method, params, id) => this.onServerRequest(method, params, id),
       restarted: () => {
-        this.loaded.clear();
+        if (threadId) this.loaded.delete(threadId); // to be resumed again before the next write
         this.scheduleRefresh();
       },
-    }, pidFile);
+    }, this.pidDir ? join(this.pidDir, pidName) : null);
+  }
+
+  /** App-servers of conversations left running when this program last stopped without closing them. */
+  private async reapWriters(): Promise<void> {
+    if (!this.pidDir || !existsSync(this.pidDir)) return;
+    for (const f of readdirSync(this.pidDir).filter((n) => /^codex-writer-.*\.pid$/.test(n))) await CodexRpc.reap(join(this.pidDir, f));
   }
 
   async start(sink: AdapterSink): Promise<void> {
     this.sink = sink;
     void this.installTool();
+    await this.reapWriters();
     await this.rpc.start();
     this.readDesktopState();
     sink.projects(this.desktop.projects);
@@ -204,7 +226,7 @@ export class CodexAdapter implements Adapter {
           if (running) {
             // A turn is in progress: guide it with the new message, as typing into a running turn does on the computer.
             try {
-              const res = await this.rpc.call<{ turnId: string }>('turn/steer', { threadId, expectedTurnId: running, input, clientUserMessageId: requestId });
+              const res = await this.writer(threadId).call<{ turnId: string }>('turn/steer', { threadId, expectedTurnId: running, input, clientUserMessageId: requestId });
               this.sink.receipt(requestId, 'accepted', res.turnId);
             } catch (error) {
               // It ended without our hearing of it (cut off, say): the message starts a turn of its own.
@@ -215,9 +237,10 @@ export class CodexAdapter implements Adapter {
             }
           }
           if (!running) {
-            const res = await this.rpc.call<{ turn: { id: string } }>('turn/start', { threadId, input, clientUserMessageId: requestId });
+            // The model and reasoning level asked for hold from this turn on, as choosing them in the app does.
+            const res = await this.writer(threadId).call<{ turn: { id: string } }>('turn/start', { threadId, input, clientUserMessageId: requestId,
+              ...(command.model ? { model: command.model } : {}), ...(command.effort ? { effort: command.effort } : {}) });
             this.activeTurn.set(threadId, res.turn.id);
-            this.held = true;
             this.sink.receipt(requestId, 'accepted', res.turn.id);
           }
         } catch (error) {
@@ -227,9 +250,11 @@ export class CodexAdapter implements Adapter {
             if (!this.activeTurn.has(threadId)) this.release(threadId); // no turn of ours to finish: do not keep it
             throw error;
           }
-          this.loaded.delete(threadId);
+          this.release(threadId);
           await this.queueMessage(threadId, text);
-          this.sink.receipt(requestId, 'accepted');
+          // It goes in through the Codex app, which runs the turn there: a model or reasoning level asked for cannot
+          // go with it, and the sender is told so rather than led to think it changed.
+          this.sink.receipt(requestId, 'accepted', undefined, command.model || command.effort ? 'in_app_model_unchanged' : 'in_app');
         }
         this.dirtyThreads.add(threadId);
         this.scheduleRefresh();
@@ -238,8 +263,15 @@ export class CodexAdapter implements Adapter {
       case 'interrupt': {
         const turnId = this.activeTurn.get(threadId);
         if (!turnId) return this.sink.receipt(requestId, 'failed', undefined, 'no_active_turn');
-        await this.ensureLoaded(threadId);
-        await this.rpc.call('turn/interrupt', { threadId, turnId });
+        try {
+          await this.ensureLoaded(threadId);
+          await this.writer(threadId).call('turn/interrupt', { threadId, turnId });
+        } catch (error) {
+          if (!/active writer/i.test((error as Error).message)) throw error;
+          // The turn runs in the Codex app on the computer: only the app can stop it.
+          this.release(threadId);
+          return this.sink.receipt(requestId, 'failed', undefined, 'in_app_cannot_stop');
+        }
         return this.sink.receipt(requestId, 'accepted', turnId);
       }
       case 'approve': {
@@ -334,16 +366,35 @@ export class CodexAdapter implements Adapter {
 
   /** A turn running in our app-server, or an approval waiting on it: both end with it when this program restarts. */
   busy(): boolean {
-    return this.approvals.size > 0 || (this.held && this.activeTurn.size > 0);
+    return this.approvals.size > 0 || [...this.activeTurn.keys()].some((id) => this.writers.has(id));
   }
 
   /** A new conversation for work another agent hands over; it shows in the Codex app like any other. */
   async create(cwd: string, title: string): Promise<{ threadId: string }> {
+    // A project's name as the desktop app shows it stands for that project's folder: the conversation is listed under it.
+    // None named: the owner's project for what AgentChat starts, 「AgentChat」, when there is one.
+    this.readDesktopState();
+    const byName = (n: string) => this.desktop.projects.find((p) => p.name.trim().toLowerCase() === n.trim().toLowerCase());
+    const project = !cwd ? byName('AgentChat') : !/[\\/:]/.test(cwd) ? byName(cwd) : undefined;
+    const root = project && this.desktop.mainRoots.get(project.id);
+    if (project && !root) throw new Error(`Codex 项目「${project.name}」没有对应的文件夹`);
+    if (root) cwd = root;
     cwd ||= homedir();
-    const res = await this.rpc.call<{ thread: { id: string } }>('thread/start', { cwd });
+    // Marked as the desktop app marks the conversations the owner starts there ("user"): one without a source is not
+    // listed among them.
+    // Started in an app-server of its own, which then runs its first turn (see writer).
+    const w = this.newWriter(`codex-writer-new-${Date.now()}.pid`);
+    let res: { thread: { id: string } };
+    try {
+      res = await w.call<{ thread: { id: string } }>('thread/start', { cwd, threadSource: 'user' });
+    } catch (error) {
+      w.close();
+      throw error;
+    }
     const threadId = res.thread.id;
+    this.writer(threadId, w);
     this.loaded.add(threadId);
-    await this.rpc.call('thread/name/set', { threadId, name: title }).catch((e: Error) => log('codex', `naming ${threadId} failed: ${e.message}`));
+    await w.call('thread/name/set', { threadId, name: title }).catch((e: Error) => log('codex', `naming ${threadId} failed: ${e.message}`));
     const info = this.withState({ threadId, agentId: this.info.id, title, cwd, updatedAt: Math.floor(Date.now() / 1000), running: false, activeTurnId: null, preview: null });
     this.known.set(threadId, info);
     this.sink.sessions([info], false);
@@ -365,7 +416,26 @@ export class CodexAdapter implements Adapter {
       cursor = res.nextCursor;
       if (!cursor) break;
     }
-    return [...out, ...this.unlisted(new Set(out.map((s) => s.threadId)))];
+    const all = [...out, ...this.unlisted(new Set(out.map((s) => s.threadId)))];
+    const models = this.models();
+    return models.size ? all.map((s) => (models.has(s.threadId) ? { ...s, model: models.get(s.threadId)! } : s)) : all;
+  }
+
+  /** The model and reasoning level each conversation works with, as Codex's own thread table keeps them. */
+  private models(): Map<string, string> {
+    let db: DatabaseSync | null = null;
+    try {
+      const file = readdirSync(this.home).filter((f) => /^state_\d+\.sqlite$/.test(f)).sort((a, b) => Number(/\d+/.exec(a)) - Number(/\d+/.exec(b))).pop();
+      if (!file) return new Map();
+      db = new DatabaseSync(join(this.home, file), { readOnly: true });
+      const rows = db.prepare('SELECT id, model, reasoning_effort AS effort FROM threads WHERE archived = 0 AND model IS NOT NULL').all() as
+        { id: string; model: string; effort: string | null }[];
+      return new Map(rows.map((r) => [r.id, r.effort ? `${r.model} · ${r.effort}` : r.model]));
+    } catch {
+      return new Map(); // an older Codex without these columns: the model is not shown
+    } finally {
+      db?.close();
+    }
   }
 
   /**
@@ -524,7 +594,7 @@ export class CodexAdapter implements Adapter {
 
   private async ensureLoaded(threadId: string): Promise<void> {
     if (this.loaded.has(threadId)) return;
-    await this.rpc.call('thread/resume', { threadId, excludeTurns: true });
+    await this.writer(threadId).call('thread/resume', { threadId, excludeTurns: true });
     this.loaded.add(threadId);
   }
 
@@ -533,10 +603,13 @@ export class CodexAdapter implements Adapter {
    * shows "已在另一个应用中打开" and cannot continue it; it is ours only for the turn the phone asked for.
    */
   private release(threadId: string): void {
-    if (!this.loaded.delete(threadId)) return;
-    this.rpc.call('thread/unsubscribe', { threadId }).catch((e: Error) => log('codex', `could not release ${threadId}: ${e.message}`));
-    // Unsubscribing alone keeps it ours as long as the app-server runs: close that too once nothing is going on.
-    this.recycleSoon();
+    this.loaded.delete(threadId);
+    const w = this.writers.get(threadId);
+    // Its app-server goes with it, which is what really hands it back (an approval still waiting keeps it a while).
+    if (!w || [...this.approvals.values()].some((a) => a.threadId === threadId)) return;
+    this.writers.delete(threadId);
+    w.close();
+    log('codex', `handed ${threadId} back to the Codex app`);
   }
 
   private onNotification(method: string, p: any): void {
@@ -546,7 +619,6 @@ export class CodexAdapter implements Adapter {
         break;
       case 'turn/started':
         if (p.turn?.id) this.activeTurn.set(p.threadId, p.turn.id);
-        this.held = true;
         this.markDirty(p.threadId);
         break;
       case 'turn/completed':
@@ -580,8 +652,9 @@ export class CodexAdapter implements Adapter {
           respond: (d) => ({ decision: d }), expire: { decision: 'decline' } };
       case 'item/permissions/requestApproval':
         return { data: { kind: 'permission', command: describePermissions(p.permissions), cwd: p.cwd ?? null, reason: p.reason ?? null },
-          // Granting gives exactly what was asked, for this turn only.
-          respond: (d) => ({ permissions: d === 'accept' ? p.permissions : {}, scope: 'turn' }), expire: { permissions: {}, scope: 'turn' } };
+          // Granting gives exactly what was asked, for this turn (or, granted for the like of it, the session).
+          respond: (d) => ({ permissions: d === 'decline' ? {} : p.permissions, scope: d === 'acceptForSession' ? 'session' : 'turn' }),
+          expire: { permissions: {}, scope: 'turn' } };
       case 'item/tool/requestUserInput': {
         const questions: Question[] = (p.questions ?? []).map((q: any) => {
           const options = (q.options ?? []).map((o: any) => ({ value: String(o.label), label: String(o.label), description: String(o.description ?? '') }));
@@ -625,18 +698,22 @@ export class CodexAdapter implements Adapter {
         item.data = { ...item.data, state, ...(answer ? { answer } : {}) };
         this.sink.items(p.threadId, [item]);
         resolveResult(result);
+        // Its turn over already (it was waiting on this alone): the conversation goes back to the desktop app.
+        if (!this.activeTurn.has(p.threadId)) setTimeout(() => this.release(p.threadId), 2000);
       };
       // Nobody answered: deny (or leave unanswered), as agreed.
       const timer = setTimeout(() => finish(ask.expire, 'expired'), APPROVAL_TIMEOUT_MS);
       const question = ask.data.kind === 'question';
       this.approvals.set(approvalId, { threadId: p.threadId, turnId: p.turnId ?? null, item,
         resolve: (decision, answers) => {
-          const accept = decision === 'accept';
+          const accept = decision === 'accept' || decision === 'acceptForSession';
+          // Granted for the like of it: Codex asks no more about such commands in this turn.
+          const kind = decision === 'acceptForSession' && (ask.data.kind === 'command' || ask.data.kind === 'file' || ask.data.kind === 'permission');
           // The card shows the answers by their labels; a secret answer is never shown back.
           const qs = (ask.data.questions as Question[] | undefined) ?? [];
           const shown = answers && !qs.some((q) => q.secret) ? Object.entries(answers)
             .map(([k, v]) => qs.find((q) => q.key === k)?.options.find((o) => o.value === v)?.label ?? v).join('；') : undefined;
-          finish(ask.respond(accept ? 'accept' : 'decline', answers), question ? (accept ? 'answered' : 'cancelled') : accept ? 'accepted' : 'declined', shown);
+          finish(ask.respond(kind ? 'acceptForSession' : accept ? 'accept' : 'decline', answers), question ? (accept ? 'answered' : 'cancelled') : accept ? 'accepted' : 'declined', shown);
         } });
       log('codex', `${question ? 'question' : 'approval'} requested (${method}) rpc=${rpcId}`);
       this.sink.items(p.threadId, [item]);

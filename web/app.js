@@ -1,10 +1,15 @@
 // Phone / browser client for the hub. Plain ES module, no build step.
 // Five tabs: 项目 (agent > project > conversation), 聊天 (conversations by time), 通讯录 (friends = device · agent),
 // 工作台 and 资料库. Only agents the owner added in 通讯录 show up elsewhere.
+// Words for the owner are written in Chinese inside t`…` and shown in the phone's language (i18n.js).
+import { t, translatePage } from './i18n.js';
+
+translatePage();
 const $ = (id) => document.getElementById(id);
 const CACHE_KEY = 'allinone.cache.v3';
 const CACHE_SESSIONS = 6; // conversations whose messages are kept for instant start
 const CACHE_ITEMS = 150;
+const HISTORY_MS = 24 * 3_600_000; // the hub keeps a day's messages (older ones are on the computers): so does the phone
 const SILENCE_LIMIT_MS = 75_000;
 const native = window.AllinOneNative;
 
@@ -25,6 +30,13 @@ const state = {
   outbox: [], // commands typed while disconnected; requestIds make resending safe
   friendLast: {}, // friend key -> last opened sessionId
   recent: [], // recently opened sessions, newest first
+  workFolded: new Set((() => { // 工作台 tasks the owner folded to their title line
+    try {
+      return JSON.parse(localStorage.getItem('allinone.workFolded') || '[]');
+    } catch {
+      return [];
+    }
+  })()),
   tab: 'chat',
   current: null,
   limit: 300,
@@ -53,7 +65,7 @@ function when(seconds) {
   if (d.toDateString() === now.toDateString()) return d.toTimeString().slice(0, 5);
   const y = new Date(now);
   y.setDate(now.getDate() - 1);
-  if (d.toDateString() === y.toDateString()) return '昨天';
+  if (d.toDateString() === y.toDateString()) return t`昨天`;
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
@@ -101,7 +113,7 @@ function sortedItems(sessionId) {
 // ---------- friends: one per device · agent ----------
 
 const friendKey = (s) => `${s.deviceId}|${s.agentId}`;
-const deviceName = (id) => state.devices.get(id)?.name || '未知设备';
+const deviceName = (id) => state.devices.get(id)?.name || t`未知设备`;
 const agentLabel = (deviceId, agentId) => state.devices.get(deviceId)?.agents.find((a) => a.id === agentId)?.label || agentId;
 
 /** The remark the owner gave, else the computer's name (plus the agent when the computer has several). */
@@ -180,13 +192,13 @@ function projectGroups(key, sessions) {
   const order = state.projects.get(key) || [];
   const groups = order.map((p) => ({ id: p.id, name: p.name, sessions: [] }));
   const byId = new Map(groups.map((g) => [g.id, g]));
-  const other = { id: '', name: '未归入项目', sessions: [] };
+  const other = { id: '', name: t`未归入项目`, sessions: [] };
   for (const s of sessions) {
     const g = (s.projectId && byId.get(s.projectId)) || (s.projectId ? null : other);
     if (g) g.sessions.push(s);
     else {
       // A project the list does not know yet (renamed or just created): show it under its own name.
-      const fresh = { id: s.projectId, name: s.projectName || '项目', sessions: [s] };
+      const fresh = { id: s.projectId, name: s.projectName || t`项目`, sessions: [s] };
       byId.set(s.projectId, fresh);
       groups.push(fresh);
     }
@@ -196,7 +208,7 @@ function projectGroups(key, sessions) {
   return groups;
 }
 
-const projectLabel = (s) => s.projectName || '未归入项目';
+const projectLabel = (s) => s.projectName || t`未归入项目`;
 
 // ---------- cache: show the last known state immediately ----------
 
@@ -207,7 +219,7 @@ function loadCache() {
     state.seq = c.seq || 0;
     for (const d of c.devices || []) state.devices.set(d.id, d);
     for (const s of c.sessions || []) state.sessions.set(s.id, s);
-    for (const [sid, list] of Object.entries(c.items || {})) state.items.set(sid, new Map(list.map((i) => [i.itemId, i])));
+    for (const [sid, list] of Object.entries(c.items || {})) state.items.set(sid, new Map(list.filter((i) => i.ts >= Date.now() - HISTORY_MS).map((i) => [i.itemId, i])));
     for (const [sid, seq] of Object.entries(c.itemSeq || {})) state.itemSeq.set(sid, seq);
     state.recent = c.recent || [];
     state.outbox = c.outbox || [];
@@ -230,7 +242,7 @@ function saveCache() {
     const items = {};
     const itemSeq = {};
     for (const sid of keep) {
-      const list = sortedItems(sid).slice(-CACHE_ITEMS);
+      const list = sortedItems(sid).filter((i) => i.ts >= Date.now() - HISTORY_MS).slice(-CACHE_ITEMS);
       if (!list.length) continue;
       items[sid] = list;
       // Only claim what was kept, so reopening fetches anything older that was dropped.
@@ -306,7 +318,8 @@ function command(sessionId, cmd) {
 function track(item) {
   const key = `${item.sessionId}|${item.itemId}`;
   if (item.kind === 'approval_request') {
-    if (item.data.state === 'pending') state.approvals.set(key, item);
+    // One the agent that handed the work over answers is not the owner's to do (unless it comes back to them).
+    if (item.data.state === 'pending' && !item.data.routedTo) state.approvals.set(key, item);
     else state.approvals.delete(key);
   } else if (item.kind === 'artifact' && !isWorkFile(item)) {
     state.artifacts.set(key, item);
@@ -345,6 +358,7 @@ function handle(msg) {
       for (const id of msg.archived) state.sessions.delete(id);
       state.seq = Math.max(state.seq, msg.seq);
       markRead(state.sessions.get(state.current));
+      if (!$('share').hidden) renderShare();
       if (!state.current) openFromHash();
       break;
     case 'items': {
@@ -376,7 +390,7 @@ function handle(msg) {
       break;
     case 'hubMoved':
       // The owner moved the hub to another computer: follow it.
-      toast('主电脑已更换，正在跳转…');
+      toast(t`主电脑已更换，正在跳转…`);
       localStorage.removeItem(CACHE_KEY);
       setTimeout(() => location.replace(msg.url), 1500);
       return;
@@ -419,7 +433,7 @@ function renderAll(jump) {
 
 function renderConn() {
   $('conn').className = 'conn' + (state.connected ? ' ok' : '');
-  $('conn').title = state.connected ? '已连接主电脑' : '正在连接主电脑…';
+  $('conn').title = state.connected ? t`已连接主电脑` : t`正在连接主电脑…`;
 }
 
 function renderNav() {
@@ -470,18 +484,18 @@ const fresh = (on) => (on ? ' unread' : '');
 
 function threadRow(s, sub) {
   return `<button class="tree-thread${s.id === state.current ? ' active' : ''}" data-open="${esc(s.id)}">${s.running ? '<span class="dot run"></span>' : ''}
-    <span class="t"><b class="${fresh(isUnread(s))}">${esc(s.title)}</b><span>${esc(sub ?? (s.running ? '运行中' : `${when(s.updatedAt)}${s.preview ? ' · ' + s.preview : ''}`))}</span></span></button>`;
+    <span class="t"><b class="${fresh(isUnread(s))}">${esc(s.title)}</b><span>${esc(sub ?? (s.running ? t`运行中` : `${when(s.updatedAt)}${s.preview ? ' · ' + s.preview : ''}`))}</span></span></button>`;
 }
 
 function renderProjects() {
   const list = friends();
-  if (!list.length) return void ($('projects').innerHTML = '<div class="empty-note">还没有好友。到「通讯录」里添加电脑上的 Agent 后，它的项目和对话会出现在这里。</div>');
+  if (!list.length) return void ($('projects').innerHTML = t`<div class="empty-note">还没有好友。到「通讯录」里添加电脑上的 Agent 后，它的项目和对话会出现在这里。</div>`);
   // First visit only: open the first friend so the tree is not all closed. After that the owner's folding stands.
   if (!state.treeInit && list[0]) {
     state.treeInit = true;
     state.expanded = [`f:${list[0].key}`];
   }
-  let html = `<div class="section">你的助手 · ${list.length}</div>`;
+  let html = t`<div class="section">你的助手 · ${list.length}</div>`;
   for (const f of list) {
     // Conversations quiet for a month are left out unless the owner asks for them (the note at the bottom).
     const onode = `o:${f.key}`;
@@ -489,13 +503,13 @@ function renderProjects() {
     const fnode = `f:${f.key}`;
     const open = isOpen(fnode);
     const device = state.devices.get(f.deviceId);
-    const status = !device?.online ? '设备离线' : f.running ? '有任务正在运行' : `${f.sessions.length} 个对话`;
+    const status = !device?.online ? t`设备离线` : f.running ? t`有任务正在运行` : t`${f.sessions.length} 个对话`;
     html += `<button class="tree-agent${open ? ' open' : ''}" data-toggle="${esc(fnode)}">${avatar(f.deviceId, f.agentId, false, 0, false, true)}
       <span class="t"><b class="${fresh(f.unread)}">${esc(friendName(f.deviceId, f.agentId))}</b><span>${esc(status)}</span></span><span class="chev">›</span></button>`;
     if (!open) continue;
     html += '<div class="tree-body">';
     const pinned = sessions.filter((s) => s.pinned);
-    if (pinned.length) html += `<div class="section">置顶对话</div><div class="pinned-box">${pinned.map((s) => threadRow(s)).join('')}</div>`;
+    if (pinned.length) html += t`<div class="section">置顶对话</div><div class="pinned-box">${pinned.map((s) => threadRow(s)).join('')}</div>`;
     for (const g of projectGroups(f.key, sessions)) {
       const pnode = `p:${f.key}|${g.id}`;
       const popen = isOpen(pnode);
@@ -505,7 +519,7 @@ function renderProjects() {
       if (popen && g.sessions.length) html += `<div class="tree-threads">${g.sessions.map((s) => threadRow(s)).join('')}</div>`;
     }
     const older = f.everything.length - f.sessions.length;
-    if (older > 0) html += `<button class="older-note link" data-toggle="${esc(onode)}">${isOpen(onode) ? '收起一个月内没有活动的对话' : `显示另外 ${older} 个一个月内没有活动的对话`}</button>`;
+    if (older > 0) html += `<button class="older-note link" data-toggle="${esc(onode)}">${isOpen(onode) ? t`收起一个月内没有活动的对话` : t`显示另外 ${older} 个一个月内没有活动的对话`}</button>`;
     html += '</div>';
   }
   $('projects').innerHTML = html;
@@ -536,8 +550,8 @@ function renderChats() {
       ${avatar(s.deviceId, s.agentId, false, count, muted || !unread)}
       <span class="body"><div class="name">${esc(s.title)}</div>
         <div class="preview">${s.running ? '<span class="dot run"></span>' : ''}<span>${esc(friendName(s.deviceId, s.agentId))} · ${esc(projectLabel(s))}</span></div></span>
-      <span class="time">${s.pinned ? '<div class="fmeta">置顶</div>' : ''}${when(caredAt(s))}${muted ? '<div class="muted-mark" title="消息免打扰">🔕</div>' : ''}</span></button>`;
-  }).join('') || '<div class="empty-note">还没有对话。到「通讯录」里添加电脑上的 Agent 后，它的对话会按时间出现在这里。</div>';
+      <span class="time">${s.pinned ? t`<div class="fmeta">置顶</div>` : ''}${when(caredAt(s))}${muted ? t`<div class="muted-mark" title="消息免打扰">🔕</div>` : ''}</span></button>`;
+  }).join('') || t`<div class="empty-note">还没有对话。到「通讯录」里添加电脑上的 Agent 后，它的对话会按时间出现在这里。</div>`;
 }
 
 // ---------- 置顶: long-press a conversation (right-click on a computer) ----------
@@ -555,8 +569,8 @@ document.addEventListener('contextmenu', (e) => {
   closePinMenu();
   pinMenu = document.createElement('div');
   pinMenu.className = 'pin-menu';
-  pinMenu.innerHTML = `<button data-pin="${esc(s.id)}">${s.pinned ? '取消置顶' : '置顶'}</button>
-    <button data-mute="${esc(s.id)}">${s.muted ? '取消消息免打扰' : '消息免打扰'}</button>`;
+  pinMenu.innerHTML = `<button data-pin="${esc(s.id)}">${s.pinned ? t`取消置顶` : t`置顶`}</button>
+    <button data-mute="${esc(s.id)}">${s.muted ? t`取消消息免打扰` : t`消息免打扰`}</button>`;
   document.body.append(pinMenu);
   const r = row.getBoundingClientRect();
   const x = Math.min(e.clientX || r.left + 24, innerWidth - pinMenu.offsetWidth - 8);
@@ -580,7 +594,7 @@ document.addEventListener('click', (e) => {
   } else {
     s.muted = !s.muted;
     send({ t: 'mute', sessionId: s.id, muted: s.muted });
-    toast(s.muted ? '已设为消息免打扰：不再提醒「完成了一轮」，审批仍会提醒' : '已取消消息免打扰');
+    toast(s.muted ? t`已设为消息免打扰：不再提醒「完成了一轮」，审批仍会提醒` : t`已取消消息免打扰`);
   }
   renderAll(false);
   saveCache();
@@ -594,16 +608,16 @@ function renderContacts() {
   const added = all.filter((f) => f.added);
   let html = '';
   if (fresh.length) {
-    html += '<div class="section">新的朋友</div>' + fresh.map((f) => `<div class="contact">${avatar(f.deviceId, f.agentId)}
+    html += t`<div class="section">新的朋友</div>` + fresh.map((f) => t`<div class="contact">${avatar(f.deviceId, f.agentId)}
       <span class="t"><b>${esc(friendName(f.deviceId, f.agentId))}</b><span>${esc(deviceName(f.deviceId))} 上的 ${esc(agentLabel(f.deviceId, f.agentId))} · ${f.sessions.length} 个对话</span></span>
       <button class="btn" data-add="${esc(f.key)}">添加</button></div>`).join('');
   }
-  html += `<div class="section">好友 · ${added.length}</div>`;
+  html += t`<div class="section">好友 · ${added.length}</div>`;
   html += added.map((f) => {
     const device = state.devices.get(f.deviceId);
-    return `<button class="contact" data-profile="${esc(f.key)}">${avatar(f.deviceId, f.agentId)}<span class="t"><b>${esc(friendName(f.deviceId, f.agentId))}</b>
-      <span>${device?.online ? '在线' : '离线'} · ${esc(agentLabel(f.deviceId, f.agentId))} · ${f.sessions.length} 个对话</span></span></button>`;
-  }).join('') || '<div class="empty-note">还没有好友。电脑加入主电脑后，它上面的 Agent 会出现在「新的朋友」里。</div>';
+    return t`<button class="contact" data-profile="${esc(f.key)}">${avatar(f.deviceId, f.agentId)}<span class="t"><b>${esc(friendName(f.deviceId, f.agentId))}</b>
+      <span>${device?.online ? t`在线` : t`离线`} · ${esc(agentLabel(f.deviceId, f.agentId))} · ${f.sessions.length} 个对话</span></span></button>`;
+  }).join('') || t`<div class="empty-note">还没有好友。电脑加入主电脑后，它上面的 Agent 会出现在「新的朋友」里。</div>`;
   $('contacts').innerHTML = html;
 }
 
@@ -657,18 +671,19 @@ function renderHeader() {
   if (!s) return;
   const device = state.devices.get(s.deviceId);
   $('chat-friend').textContent = friendName(s.deviceId, s.agentId);
-  $('chat-thread-name').textContent = s.title + (device && !device.online ? ' · 设备离线' : s.running ? ' · 运行中' : '');
+  $('chat-thread-name').textContent = s.title + (device && !device.online ? t` · 设备离线` : s.running ? t` · 运行中` : s.background > 0 ? t` · 后台在跑` : '');
   $('stop').hidden = !s.running;
   const files = sortedItems(s.id).filter((i) => i.kind === 'artifact' && !isWorkFile(i)).length;
-  $('files-btn').textContent = files ? `文件 ${files}` : '文件';
+  $('files-btn').textContent = files ? t`文件 ${files}` : t`文件`;
   updateSend();
 }
 
-const TOOL_NAMES = { shell: '命令', edit: '修改文件', web: '搜索', image: '生成图片' };
-const TOOL_STATE = { inProgress: '进行中', completed: '', failed: '失败', declined: '已拒绝' };
-const REQ_STATE = { pending: '发送中', queued: '待送达', accepted: '已发送', unknown: '状态未知', failed: '发送失败', cancelled: '已取消' };
-const REQ_ERRORS = [[/waiting_for_window/, '等电脑上的窗口空出来（锁屏、有没发出的草稿或正在使用），会自动发进去'], [/window_unavailable/, '电脑上的窗口两小时都没空出来，没有发送'],
-  [/ambiguous_title/, '电脑上有两个同名对话，请先给其中一个改名'], [/desktop_restart/, '电脑上没有打开 Claude，已用后台方式发送'], [/active writer/i, '对话正被电脑占用'], [/busy_on_computer/, '电脑上正在运行，等这一轮结束再发'], [/claude_not_found/, '电脑上没有找到 Claude Code'], [/opencode_not_running/, '电脑上的 OpenCode 没有打开'], [/goose_not_found/, '电脑上没有找到 Goose，请先打开一次 Goose'], [/goose_background/, '电脑上没有打开 Goose，已用后台方式发送，打开 Goose 就能看到'], [/dsh_answer_on_computer/, 'DSH 的审批要在电脑上的 DSH 窗口里点'], [/dsh_failed/, 'DSH 没能接下这条消息'],[/device_offline/, '设备离线'], [/no_active_turn/, '没有正在运行的任务'], [/approval_not_found/, '审批已失效']];
+const TOOL_NAMES = { shell: t`命令`, edit: t`修改文件`, web: t`搜索`, image: t`生成图片` };
+const TOOL_STATE = { inProgress: t`进行中`, completed: '', failed: t`失败`, declined: t`已拒绝` };
+const REQ_STATE = { pending: t`发送中`, queued: t`待送达`, accepted: t`已发送`, unknown: t`状态未知`, failed: t`发送失败`, cancelled: t`已取消` };
+const REQ_ERRORS = [[/in_app_model_unchanged/, t`经电脑上的 Codex 软件送进去了（模型没有换，要在软件里切换）`], [/in_app_cannot_stop/, t`这一轮在电脑上的 Codex 软件里跑，要在软件里点停止`],
+  [/\bin_app\b/, t`经电脑上的 Codex 软件送进去了`], [/waiting_for_window/, t`等电脑上的窗口空出来（锁屏、有没发出的草稿或正在使用），会自动发进去`], [/window_unavailable/, t`电脑上的窗口两小时都没空出来，没有发送`],
+  [/ambiguous_title/, t`电脑上有两个同名对话，请先给其中一个改名`], [/desktop_restart/, t`电脑上没有打开 Claude，已用后台方式发送`], [/active writer/i, t`对话正被电脑占用`], [/busy_on_computer/, t`电脑上正在运行，等这一轮结束再发`], [/claude_not_found/, t`电脑上没有找到 Claude Code`], [/opencode_not_running/, t`电脑上的 OpenCode 没有打开`], [/goose_not_found/, t`电脑上没有找到 Goose，请先打开一次 Goose`], [/goose_background/, t`电脑上没有打开 Goose，已用后台方式发送，打开 Goose 就能看到`], [/dsh_answer_on_computer/, t`DSH 的审批要在电脑上的 DSH 窗口里点`], [/dsh_failed/, t`DSH 没能接下这条消息`],[/device_offline/, t`设备离线`], [/no_active_turn/, t`没有正在运行的任务`], [/approval_not_found/, t`审批已失效`]];
 /** A failure in words: ours explained, the agent's own (a model refusing, say) as it gave it. */
 const reqError = (error) => REQ_ERRORS.find(([re]) => re.test(error))?.[1] ?? String(error).slice(0, 200);
 const GAP_MS = 5 * 60_000;
@@ -685,7 +700,8 @@ function renderMessages(jump) {
   const delivered = new Set(all.filter((i) => i.kind === 'message' && i.data.clientId).map((i) => i.data.clientId));
   const them = avatar(s.deviceId, s.agentId, true, 0, false, true);
 
-  let html = all.length > items.length ? '<div class="time-sep"><button class="link" id="more">显示更早的消息</button></div>' : '';
+  let html = all.length > items.length ? t`<div class="time-sep"><button class="link" id="more">显示更早的消息</button></div>`
+    : t`<div class="time-sep">这里只有最近一天的消息，更早的在电脑上的对话里</div>`;
   // Messages sent from here that are not in the conversation yet, placed at the time they were sent.
   const mine = [...state.requests.values()].filter((r) => r.sessionId === sid && r.op === 'send' && r.state !== 'delivered' && !delivered.has(r.requestId))
     .sort((a, b) => a.createdAt - b.createdAt);
@@ -707,7 +723,7 @@ function renderMessages(jump) {
     if (!tools.length) return;
     const running = tools.some((t) => t.data.status === 'inProgress');
     const failed = tools.filter((t) => t.data.status === 'failed').length;
-    html += `<details class="tools"><summary>${running ? '进行中' : '<span class="ok">✓</span> 已完成'} · 查看执行记录 ${tools.length} 项${failed ? ` · ${failed} 项失败` : ''}</summary>
+    html += t`<details class="tools"><summary>${running ? t`进行中` : t`<span class="ok">✓</span> 已完成`} · 查看执行记录 ${tools.length} 项${failed ? t` · ${failed} 项失败` : ''}</summary>
       ${tools.map(toolHtml).join('')}</details>`;
     tools = [];
   };
@@ -725,7 +741,7 @@ function renderMessages(jump) {
         const from = agentOrigin(text);
         // Sent by another agent through AgentChat: shown as that agent's, not as the owner's.
         if (from) {
-          const who = `${esc(from.who)} 派来${from.conv ? ` ·「${esc(from.conv)}」` : ''}`;
+          const who = t`${esc(from.who)} 派来${from.conv ? ` ·「${esc(from.conv)}」` : ''}`;
           html += `<div class="row from-agent"><div class="who">${from.from ? `<button class="link" data-open="${esc(from.from)}">${who} ›</button>` : who}</div><div class="bubble">${esc(from.body)}</div></div>`;
         }
         else if (text) html += `<div class="row mine"><div class="bubble">${esc(text)}</div></div>`;
@@ -738,7 +754,7 @@ function renderMessages(jump) {
     } else if (item.kind === 'handoff') {
       html += `<div class="row">${them}${handoffHtml(item)}</div>`;
     } else if (item.kind === 'status' && ['failed', 'interrupted'].includes(item.data.status)) {
-      html += `<div class="notice">${item.data.status === 'failed' ? '这一轮执行失败' : '这一轮已停止'}${item.data.error ? '：' + esc(item.data.error) : ''}</div>`;
+      html += `<div class="notice">${item.data.status === 'failed' ? t`这一轮执行失败` : t`这一轮已停止`}${item.data.error ? t`：` + esc(item.data.error) : ''}</div>`;
     }
   }
   flush();
@@ -755,15 +771,16 @@ function agentOrigin(text) {
   // 「[来自 X「对话」，经 AgentChat 转发]」 hands work over; 「[来自 X「对话」的汇报，…]」 brings its outcome back.
   // AllinOne: what AgentChat was called before; older messages carry that name.
   // The tag after 转发 (#1a2b3c4d) tells the hub which request it is; nothing for the owner to read.
-  const m = /^\[来自 (.+?)(?:「(.+?)」)?(的汇报)?，经 (?:AgentChat|AllinOne) 转发(?:给「[^」]*」)?(?: #[0-9a-f]+)?\] ?([\s\S]*)$/.exec(text || '');
+  const m = /^\[来自 (.+?)(?:「(.+?)」)?(的汇报|的请示)?，经 (?:AgentChat|AllinOne) 转发(?:给「[^」]*」)?(?: #[0-9a-f]+)?\] ?([\s\S]*)$/.exec(text || '');
   if (!m) return null;
   // The sender's conversation, to jump back to: same title, same computer · agent.
   const from = m[2] ? [...state.sessions.values()].find((s) => s.title.startsWith(m[2]) && `${deviceName(s.deviceId)} · ${agentLabel(s.deviceId, s.agentId)}` === m[1]) : null;
-  return { who: m[3] ? `${m[1]} 的汇报` : m[1], conv: m[2] || null, from: from?.id || null, body: m[4], report: Boolean(m[3]) };
+  const asks = m[3] === '的请示'; // the work it was handed waits for the sender's answer
+  return { who: m[3] ? (asks ? t`${m[1]} 的请示` : t`${m[1]} 的汇报`) : m[1], conv: m[2] || null, from: from?.id || null, body: m[4], report: m[3] === '的汇报', asks };
 }
 
-const HANDOFF_STATE = { running: ['进行中', ''], queued: ['等对方上线', ''], waiting_window: ['排队中，等对方做完上一轮', ''], waiting_approval: ['等你审批', 'warn'], done: ['已完成', 'ok'],
-  failed: ['失败', 'bad'], interrupted: ['已停止', 'bad'] };
+const HANDOFF_STATE = { running: [t`进行中`, ''], background: [t`后台在跑`, ''], waiting_sender: [t`等派活方审批`, 'warn'], queued: [t`等对方上线`, ''], waiting_window: [t`排队中，等对方做完上一轮`, ''], waiting_approval: [t`等你审批`, 'warn'], done: [t`已完成`, 'ok'],
+  failed: [t`失败`, 'bad'], interrupted: [t`已停止`, 'bad'] };
 
 /**
  * Hand-off cards go right after the owner's message that led to them, ahead of the agent's account of the turn:
@@ -791,20 +808,20 @@ function placeHandoffs(items) {
 function handoffHtml(item) {
   const d = item.data;
   const [label, tone] = HANDOFF_STATE[d.state] || [d.state, ''];
-  const took = d.endedAt ? ` · ${Math.max(1, Math.round((d.endedAt - d.startedAt) / 60000))} 分钟` : '';
+  const took = d.endedAt ? t` · ${Math.max(1, Math.round((d.endedAt - d.startedAt) / 60000))} 分钟` : '';
   // Waiting for the owner: the receiving conversation's own approval cards, right here.
   const asks = d.state === 'waiting_approval' ? [...state.approvals.values()].filter((a) => a.sessionId === d.targetSessionId)
     .map((a) => `<div class="ask"><div>${approvalTitle(a.data)}</div>${a.data.command ? `<code>${esc(a.data.command)}</code>` : ''}${approveButtons(a)}</div>`).join('') : '';
   const reply = d.reply ? `<details class="reply"><summary>${esc(d.reply.replace(/\s+/g, ' ').slice(0, 90))}${d.reply.length > 90 ? '…' : ''}</summary><div>${md(d.reply)}</div></details>` : '';
-  const go = !d.channel && state.sessions.has(d.targetSessionId) ? `<button class="link" data-open="${esc(d.targetSessionId)}">打开对方对话 ›</button>` : '';
-  const why = d.error && ['failed', 'interrupted'].includes(d.state) ? `<div class="why">原因：${esc(reqError(d.error))}</div>` : '';
-  return `<div class="handoff"><div class="top"><span>→ 派给 <b>${esc(d.to)}</b></span><span class="chip ${tone}">${label}${took}</span></div>
+  const go = !d.channel && state.sessions.has(d.targetSessionId) ? t`<button class="link" data-open="${esc(d.targetSessionId)}">打开对方对话 ›</button>` : '';
+  const why = d.error && ['failed', 'interrupted'].includes(d.state) ? t`<div class="why">原因：${esc(reqError(d.error))}</div>` : '';
+  return t`<div class="handoff"><div class="top"><span>→ 派给 <b>${esc(d.to)}</b></span><span class="chip ${tone}">${label}${took}</span></div>
     <div class="what">${esc(d.text)}</div>${why}${asks}${reply}${go}</div>`;
 }
 
 /** On its way (as in WeChat): a small circle turning beside the message until it is there; then the message stands alone. */
 const SENDING = new Set(['pending', 'accepted', 'queued']);
-const spinner = '<span class="sending" role="img" aria-label="发送中"></span>';
+const spinner = t`<span class="sending" role="img" aria-label="发送中"></span>`;
 
 function requestHtml(r) {
   const from = agentOrigin(r.text);
@@ -813,10 +830,10 @@ function requestHtml(r) {
       ${SENDING.has(r.state) ? '' : `<div class="state">${REQ_STATE[r.state] || r.state}</div>`}</div>`;
   }
   const bad = r.state === 'failed' || r.state === 'unknown';
-  const reason = r.error ? (REQ_ERRORS.find(([re]) => re.test(r.error))?.[1] ?? '出错了') : '';
+  const reason = r.error ? (REQ_ERRORS.find(([re]) => re.test(r.error))?.[1] ?? t`出错了`) : '';
   // Plain sending needs no words; waiting for the computer's window says why, and can be called off.
   const words = r.state === 'pending' || r.state === 'accepted' ? ''
-    : `${REQ_STATE[r.state] || r.state}${reason ? ' · ' + esc(reason) : ''}${r.state === 'queued' ? ` · <button class="link" data-cancel="${esc(r.requestId)}">取消</button>` : ''}`;
+    : `${REQ_STATE[r.state] || r.state}${reason ? ' · ' + esc(reason) : ''}${r.state === 'queued' ? t` · <button class="link" data-cancel="${esc(r.requestId)}">取消</button>` : ''}`;
   const text = r.text === MARK ? '' : r.text;
   // Once the hub has them, the files show as the conversation's own items; until then, from the request.
   const files = (r.files || []).filter((f, i) => !state.items.get(r.sessionId)?.has(`sent:${r.requestId}:${i}`));
@@ -828,7 +845,7 @@ function requestHtml(r) {
 function toolHtml(t) {
   const name = TOOL_NAMES[t.data.tool] || t.data.tool;
   const st = TOOL_STATE[t.data.status] ?? '';
-  const exit = t.data.exitCode !== null && t.data.exitCode !== undefined && t.data.exitCode !== 0 ? ` · 退出码 ${t.data.exitCode}` : '';
+  const exit = t.data.exitCode !== null && t.data.exitCode !== undefined && t.data.exitCode !== 0 ? t` · 退出码 ${t.data.exitCode}` : '';
   return `<div class="tool"><div class="head"><span class="label">${esc(name)}</span><span class="sum">${esc(t.data.summary)}</span></div>
     ${st || exit ? `<div class="${t.data.status === 'failed' ? 'bad' : 'label'}">${esc(st)}${esc(exit)}</div>` : ''}
     ${t.data.output ? `<pre>${esc(t.data.output)}</pre>` : ''}</div>`;
@@ -868,27 +885,28 @@ function fileCard(item) {
 }
 
 function approvalTitle(d) {
-  return { question: '需要你回答', file: '请求修改文件', permission: '申请更多权限', link: '需要你打开链接', mcp: '请求使用插件工具' }[d.kind] || '请求执行命令';
+  return { question: t`需要你回答`, file: t`请求修改文件`, permission: t`申请更多权限`, link: t`需要你打开链接`, mcp: t`请求使用插件工具`,
+    delivery: t`消息送不进去，等你处理` }[d.kind] || t`请求执行命令`;
 }
 
 // What a command will do, in plain words, for the owner deciding on it: the actions it takes (risky ones first) and
 // the files it touches. Not a full reading of the command: the original stays one tap away.
 const COMMAND_ACTS = [
-  [/\b(Remove-Item|rm|del|rmdir|rd|erase)\b|::Delete\(/i, '删除文件', true],
-  [/\b(npm|pnpm|yarn|pip3?|winget|choco|scoop)\s+(i|install|add)\b|Install-Package|Install-Module/i, '安装软件', true],
-  [/\b(Invoke-WebRequest|Invoke-RestMethod|iwr|irm|curl|wget)\b|https?:\/\//i, '访问网络', true],
-  [/\bgit\s+(push|reset|clean|checkout\s+--|rebase)\b/i, '改动代码仓库（git）', true],
-  [/\b(Stop-Process|taskkill|kill)\b/i, '结束正在运行的程序', true],
-  [/\b(reg\s+(add|delete)|Set-ItemProperty|New-ItemProperty)\b/i, '修改系统设置', true],
-  [/\b(Set-Content|Add-Content|Out-File|New-Item|WriteAll(Text|Bytes|Lines))\b|FileMode\]::Create|>\s*['"]?[\w.:\\/]/i, '写入或新建文件', false],
-  [/\b(Copy-Item|cp|copy|xcopy|robocopy)\b/i, '复制文件', false],
-  [/\b(Move-Item|mv|move|Rename-Item|ren)\b/i, '移动或重命名文件', false],
-  [/\b(Get-Content|cat|type|Select-String|findstr|ReadAll(Text|Bytes|Lines))\b/i, '读取文件', false],
-  [/\b(Get-ChildItem|ls|dir|tree)\b/i, '查看文件夹', false],
-  [/\bgit\s+(status|log|diff|show)\b/i, '查看代码仓库', false],
-  [/\bgit\s+(add|commit)\b/i, '提交代码', false],
-  [/\b(node|python3?|py|npm\s+run|npx|pytest|dotnet|go\s+run|cargo)\b/i, '运行程序或脚本', false],
-  [/\bStart-Process\b/i, '启动程序', false],
+  [/\b(Remove-Item|rm|del|rmdir|rd|erase)\b|::Delete\(/i, t`删除文件`, true],
+  [/\b(npm|pnpm|yarn|pip3?|winget|choco|scoop)\s+(i|install|add)\b|Install-Package|Install-Module/i, t`安装软件`, true],
+  [/\b(Invoke-WebRequest|Invoke-RestMethod|iwr|irm|curl|wget)\b|https?:\/\//i, t`访问网络`, true],
+  [/\bgit\s+(push|reset|clean|checkout\s+--|rebase)\b/i, t`改动代码仓库（git）`, true],
+  [/\b(Stop-Process|taskkill|kill)\b/i, t`结束正在运行的程序`, true],
+  [/\b(reg\s+(add|delete)|Set-ItemProperty|New-ItemProperty)\b/i, t`修改系统设置`, true],
+  [/\b(Set-Content|Add-Content|Out-File|New-Item|WriteAll(Text|Bytes|Lines))\b|FileMode\]::Create|>\s*['"]?[\w.:\\/]/i, t`写入或新建文件`, false],
+  [/\b(Copy-Item|cp|copy|xcopy|robocopy)\b/i, t`复制文件`, false],
+  [/\b(Move-Item|mv|move|Rename-Item|ren)\b/i, t`移动或重命名文件`, false],
+  [/\b(Get-Content|cat|type|Select-String|findstr|ReadAll(Text|Bytes|Lines))\b/i, t`读取文件`, false],
+  [/\b(Get-ChildItem|ls|dir|tree)\b/i, t`查看文件夹`, false],
+  [/\bgit\s+(status|log|diff|show)\b/i, t`查看代码仓库`, false],
+  [/\bgit\s+(add|commit)\b/i, t`提交代码`, false],
+  [/\b(node|python3?|py|npm\s+run|npx|pytest|dotnet|go\s+run|cargo)\b/i, t`运行程序或脚本`, false],
+  [/\bStart-Process\b/i, t`启动程序`, false],
 ];
 function explainCommand(cmd) {
   const acts = COMMAND_ACTS.filter(([re]) => re.test(cmd));
@@ -899,49 +917,59 @@ function explainCommand(cmd) {
   const risky = acts.some(([, , r]) => r);
   // Risky ones first; the rest in the order the command does them.
   const at = (re) => cmd.search(re);
-  const what = acts.sort((a, b) => Number(b[2]) - Number(a[2]) || at(a[0]) - at(b[0])).map(([, w]) => w).join('、');
-  return { text: `它要${what}${files.length ? `：${files.map((f) => `「${f}」`).join('、')}` : ''}`, risky };
+  const what = acts.sort((a, b) => Number(b[2]) - Number(a[2]) || at(a[0]) - at(b[0])).map(([, w]) => w).join(t`、`);
+  return { text: t`它要${what}${files.length ? `：${files.map((f) => `「${f}」`).join(t`、`)}` : ''}`, risky };
 }
 
 function approvalHtml(item) {
   const d = item.data;
   // Commands are explained in plain words first; the command itself folds away behind 「查看原始命令」.
   const plain = (d.kind === 'command' || d.kind === 'file') && d.command ? explainCommand(String(d.command)) : null;
-  const raw = (c) => plain || d.kind === 'command' ? `<details class="raw"><summary>查看原始命令</summary><code>${esc(c)}</code></details>` : `<code>${esc(c)}</code>`;
-  const lead = plain ? `<div class="plain${plain.risky ? ' risky' : ''}">${esc(plain.text)}${plain.risky ? '（这类操作请看清再允许）' : ''}</div>` : '';
-  const why = d.reason && d.kind !== 'mcp' && d.kind !== 'permission' ? `<div class="why">理由：${esc(d.reason)}</div>` : '';
+  const raw = (c) => plain || d.kind === 'command' ? t`<details class="raw"><summary>查看原始命令</summary><code>${esc(c)}</code></details>` : `<code>${esc(c)}</code>`;
+  const lead = plain ? `<div class="plain${plain.risky ? ' risky' : ''}">${esc(plain.text)}${plain.risky ? t`（这类操作请看清再允许）` : ''}</div>` : '';
+  const why = d.reason && d.kind !== 'mcp' && d.kind !== 'permission' ? t`<div class="why">理由：${esc(d.reason)}</div>` : '';
   // A question card shows its questions with the choices; others show what is asked for.
-  const body = d.kind === 'question' && d.state === 'pending' ? (d.reason && d.reason !== d.questions?.[0]?.description ? `<div>${esc(d.reason)}</div>` : '')
+  const body = (d.kind === 'question' || d.kind === 'delivery') && d.state === 'pending' ? (d.reason && d.reason !== d.questions?.[0]?.description ? `<div>${esc(d.reason)}</div>` : '')
     : d.kind === 'link' && d.command ? `<div>${esc(d.reason || '')}</div><a class="where" href="${esc(d.command)}" target="_blank" rel="noopener">${esc(d.command)}</a>`
     : d.command ? `${(d.kind === 'permission' || d.kind === 'mcp') && d.reason ? `<div>${esc(d.reason)}</div>` : ''}${lead}${why}${raw(d.command)}` : d.reason ? `<div>${esc(d.reason)}</div>` : '';
-  const done = { accepted: '已允许', declined: '已拒绝', expired: '无人回应，已自动拒绝', cancelled: '已取消', elsewhere: '已交给电脑处理',
-    gone: '已失效：电脑上的程序重启过，这一轮已经停了，需要的话让它重新做一次',
-    answered: '已回答' + (d.answer ? '：' + d.answer : '') }[d.state];
+  const done = { accepted: t`已允许`, declined: t`已拒绝`, expired: t`无人回应，已自动拒绝`, cancelled: t`已取消`, elsewhere: t`已交给电脑处理`,
+    gone: t`已失效：电脑上的程序重启过，这一轮已经停了，需要的话让它重新做一次`,
+    answered: t`已回答` + (d.answer ? t`：` + d.answer : ''), sent: t`已送进窗口`, cli: t`已从后台送进去`, dropped: t`这条消息不送了` }[d.state];
   return `<div class="approval"><div class="q">${approvalTitle(d)}</div>${body}${d.cwd && d.kind !== 'question' ? `<div class="where">${esc(d.cwd)}</div>` : ''}
     ${d.state === 'pending' ? approveButtons(item) : `<div class="done">${esc(done || '')}</div>`}</div>`;
 }
 
 function approveButtons(item) {
   // An agent that takes its answers only in its own window (DSH): said so, no buttons that could not work.
-  if (item.data.onComputer) return '<div class="fmeta">这个审批要在电脑上的 Agent 窗口里点</div>';
+  if (item.data.onComputer) return t`<div class="fmeta">这个审批要在电脑上的 Agent 窗口里点</div>`;
+  // Whose it is: the agent that handed the work over (the owner may still answer it), or the owner's after it waited.
+  const whose = item.data.state !== 'pending' ? ''
+    : item.data.routedTo ? t`<div class="fmeta">由派活方「${esc(item.data.routedTo)}」审批，你也可以直接处理</div>`
+      : item.data.escalatedFrom ? t`<div class="fmeta">派活方「${esc(item.data.escalatedFrom)}」没有答复，交给你处理</div>` : '';
+  return whose + approveButtonsFor(item);
+}
+
+function approveButtonsFor(item) {
   const a = `data-session="${esc(item.sessionId)}" data-approve="${esc(item.data.approvalId)}"`;
-  if (item.data.kind === 'question') {
+  if (item.data.kind === 'question' || item.data.kind === 'delivery') {
     const qs = item.data.questions || [];
+    // A message waiting to go in: one of its choices, or nothing yet (it waits on).
+    const skip = item.data.kind === 'delivery' ? '' : t`<button class="pill no" ${a} data-decision="decline">不回答</button>`;
     const single = qs.length === 1;
     const typed = qs.some((q) => q.custom);
     // One question: a choice answers it. Otherwise choose or type an answer for each, then submit.
     return `<div class="questions">${qs.map((q) => `<div class="question"><b>${esc(q.title)}</b>${q.description ? `<div>${esc(q.description)}</div>` : ''}
       ${q.options?.length ? `<div class="options">${q.options.map((o) => `<button class="option" ${a} data-qkey="${esc(q.key)}" data-qvalue="${esc(o.value)}"${single ? ' data-single="1"' : ''}>${esc(o.label)}${o.description ? `<small>${esc(o.description)}</small>` : ''}</button>`).join('')}</div>` : ''}
-      ${q.custom ? `<input class="qinput" data-qtext="${esc(q.key)}" type="${q.secret ? 'password' : 'text'}" placeholder="${q.options?.length ? '或者自己写' : '在这里填写'}" autocomplete="off">` : ''}</div>`).join('')}
-      <div class="actions"><button class="pill no" ${a} data-decision="decline">不回答</button>${!single || typed ? `<button class="pill ok" ${a} data-qsubmit="1">提交</button>` : ''}</div></div>`;
+      ${q.custom ? `<input class="qinput" data-qtext="${esc(q.key)}" type="${q.secret ? 'password' : 'text'}" placeholder="${q.options?.length ? t`或者自己写` : t`在这里填写`}" autocomplete="off">` : ''}</div>`).join('')}
+      <div class="actions">${skip}${!single || typed ? t`<button class="pill ok" ${a} data-qsubmit="1">提交</button>` : ''}</div></div>`;
   }
-  const [no, ok] = item.data.kind === 'link' ? ['取消', '已完成'] : ['拒绝', '允许'];
+  const [no, ok] = item.data.kind === 'link' ? [t`取消`, t`已完成`] : [t`拒绝`, t`允许`];
   return `<div class="actions"><button class="pill no" ${a} data-decision="decline">${no}</button><button class="pill ok" ${a} data-decision="accept">${ok}</button></div>`;
 }
 
 function answerQuestion(el, answers) {
   command(el.dataset.session, { requestId: newId(), op: 'approve', approvalId: el.dataset.approve, decision: 'accept', answers });
-  el.closest('.questions').outerHTML = '<div class="done">已提交</div>';
+  el.closest('.questions').outerHTML = t`<div class="done">已提交</div>`;
 }
 
 function itemByKey(key) {
@@ -980,12 +1008,12 @@ document.addEventListener('click', (e) => {
     // What is typed wins over a choice for the same question.
     for (const input of card.querySelectorAll('[data-qtext]')) if (input.value.trim()) answers[input.dataset.qtext] = input.value.trim();
     const keys = new Set([...card.querySelectorAll('[data-qkey], [data-qtext]')].map((b) => b.dataset.qkey || b.dataset.qtext));
-    if (Object.keys(answers).length < keys.size) return toast('每个问题都回答了再提交');
+    if (Object.keys(answers).length < keys.size) return toast(t`每个问题都回答了再提交`);
     return answerQuestion(t, answers);
   }
   if (t.dataset.approve) {
     command(t.dataset.session, { requestId: newId(), op: 'approve', approvalId: t.dataset.approve, decision: t.dataset.decision });
-    (t.closest('.questions') || t.closest('.actions')).outerHTML = '<div class="done">已提交</div>';
+    (t.closest('.questions') || t.closest('.actions')).outerHTML = t`<div class="done">已提交</div>`;
     return;
   }
   if (t.dataset.cancel) return command(state.current, { requestId: t.dataset.cancel, op: 'cancel' });
@@ -1004,14 +1032,14 @@ function renderSheet() {
   $('sheet-q').hidden = all.length <= 12;
   const match = (x) => (q || isRecent(x)) && (!q || x.title.toLowerCase().includes(q) || (x.preview || '').toLowerCase().includes(q) || base(x.cwd).toLowerCase().includes(q));
   const row = (x) => `<button class="thread-row" data-open="${esc(x.id)}">${x.running ? '<span class="dot run"></span>' : ''}<span class="t"><b>${esc(x.title)}</b>
-    <span>${x.running ? '运行中' : when(x.updatedAt)}${x.preview ? ' · ' + esc(x.preview) : ''}</span></span>${x.id === s.id ? '<span class="check">✓</span>' : ''}</button>`;
+    <span>${x.running ? t`运行中` : when(x.updatedAt)}${x.preview ? ' · ' + esc(x.preview) : ''}</span></span>${x.id === s.id ? '<span class="check">✓</span>' : ''}</button>`;
   let html = '';
   const recent = state.recent.map((id) => state.sessions.get(id)).filter((x) => x && friendKey(x) === key && match(x)).slice(0, 5);
-  if (recent.length && !q) html += '<div class="section">最近</div>' + recent.map(row).join('');
+  if (recent.length && !q) html += t`<div class="section">最近</div>` + recent.map(row).join('');
   for (const g of projectGroups(key, all.filter(match))) {
     if (g.sessions.length) html += `<div class="section">${esc(g.name)}</div>` + g.sessions.map(row).join('');
   }
-  $('sheet-list').innerHTML = html || '<div class="empty-note">没有匹配的对话</div>';
+  $('sheet-list').innerHTML = html || t`<div class="empty-note">没有匹配的对话</div>`;
 }
 
 function openSheet() {
@@ -1049,15 +1077,15 @@ function addFiles(list) {
   const files = picked();
   for (const file of list) {
     if (files.length >= MAX_FILES) {
-      toast(`一次最多发送 ${MAX_FILES} 个文件`);
+      toast(t`一次最多发送 ${MAX_FILES} 个文件`);
       break;
     }
     if (file.size > MAX_UPLOAD) {
-      toast(`「${file.name}」超过 25 MB`);
+      toast(t`「${file.name}」超过 25 MB`);
       continue;
     }
     if (!file.size) continue;
-    const a = { id: newId(), file, name: file.name || (file.type.startsWith('image/') ? `图片-${Date.now()}.${(file.type.split('/')[1] || 'png').replace('jpeg', 'jpg')}` : 'file'),
+    const a = { id: newId(), file, name: file.name || (file.type.startsWith('image/') ? t`图片-${Date.now()}.${(file.type.split('/')[1] || 'png').replace('jpeg', 'jpg')}` : 'file'),
       mime: file.type || 'application/octet-stream', size: file.size, progress: 0, meta: null, failed: false,
       preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : null };
     files.push(a);
@@ -1086,13 +1114,13 @@ function upload(a) {
       a.meta = body;
     } catch (e) {
       a.failed = true;
-      toast(`「${a.name}」上传失败：${e.message}`);
+      toast(t`「${a.name}」上传失败：${e.message}`);
     }
     renderTray();
   };
   xhr.onerror = () => {
     a.failed = true;
-    toast(`「${a.name}」上传失败，点它重试`);
+    toast(t`「${a.name}」上传失败，点它重试`);
     renderTray();
   };
   xhr.send(a.file);
@@ -1105,8 +1133,8 @@ function renderTray() {
   tray.innerHTML = files.map((a) => {
     const kind = fileKind(a.mime, a.name);
     const label = kind === 'pdf' ? 'PDF' : (a.name.split('.').pop() || 'FILE').slice(0, 4).toUpperCase();
-    const veil = a.failed ? '<span class="veil">重试</span>' : !a.meta ? `<span class="veil"><span class="bar-p"><i style="width:${Math.round(a.progress * 100)}%"></i></span></span>` : '';
-    return `<div class="att${a.failed ? ' failed' : ''}" data-att="${a.id}" title="${esc(a.name)} · ${size(a.size)}">
+    const veil = a.failed ? t`<span class="veil">重试</span>` : !a.meta ? `<span class="veil"><span class="bar-p"><i style="width:${Math.round(a.progress * 100)}%"></i></span></span>` : '';
+    return t`<div class="att${a.failed ? ' failed' : ''}" data-att="${a.id}" title="${esc(a.name)} · ${size(a.size)}">
       ${a.preview ? `<img src="${a.preview}" alt="">` : `<span class="ficon ${kind}">${esc(label)}</span><span class="an">${esc(a.name)}</span>`}
       ${veil}<button class="x" data-unpick="${a.id}" aria-label="移除">×</button></div>`;
   }).join('');
@@ -1200,7 +1228,7 @@ function sentFilesHtml(files) {
 
 $('stop').addEventListener('click', () => {
   if (state.current) command(state.current, { requestId: newId(), op: 'interrupt' });
-  toast('已请求停止');
+  toast(t`已请求停止`);
 });
 $('back').addEventListener('click', () => setView('side'));
 
@@ -1213,18 +1241,23 @@ $('back').addEventListener('click', () => setView('side'));
 function collaborationsHtml(today) {
   const all = [...state.requests.values()].filter((r) => r.op === 'send' && new Date(r.createdAt).toDateString() === today)
     .map((r) => ({ r, o: agentOrigin(r.text), to: state.sessions.get(r.sessionId) })).filter((x) => x.o && x.to && x.o.from);
-  const steps = all.filter((x) => !x.o.report).sort((a, b) => a.r.createdAt - b.r.createdAt);
+  const steps = all.filter((x) => !x.o.report && !x.o.asks).sort((a, b) => a.r.createdAt - b.r.createdAt);
   if (!steps.length) return '';
   const reports = all.filter((x) => x.o.report);
   // A step passes on work its sender was handed shortly before (the latest such, within half an hour); with none, it
   // starts a task of its own, in the conversation the owner works in.
   const parentOf = new Map(steps.map((x) => [x, steps.filter((y) => y.to.id === x.o.from && y.r.createdAt < x.r.createdAt
     && x.r.createdAt - y.r.createdAt < 30 * 60_000).at(-1) ?? null]));
+  // The latest step into each conversation: work running there now (its own turn, or in the background) is its.
+  const latest = new Map(steps.map((x) => [x.to.id, x]));
+  const live = (x) => latest.get(x.to.id) === x && (x.to.running || x.to.background > 0);
   const status = (x) => {
-    if (x.r.state === 'failed') return ['失败', 'bad'];
-    if (reports.some((y) => y.to.id === x.o.from && y.o.from === x.to.id && y.r.createdAt >= x.r.createdAt)) return ['已汇报', 'ok'];
-    if (x.to.running) return ['进行中', ''];
-    return ['已送达', ''];
+    if (x.r.state === 'failed') return [t`失败`, 'bad'];
+    if (latest.get(x.to.id) === x && x.to.running) return [t`进行中`, ''];
+    if (latest.get(x.to.id) === x && x.to.background > 0) return [t`后台在跑`, ''];
+    if (reports.some((y) => y.to.id === x.o.from && y.o.from === x.to.id && y.r.createdAt >= x.r.createdAt)) return [t`已汇报`, 'ok'];
+    if (x.to.running) return [t`进行中`, ''];
+    return [t`已送达`, ''];
   };
   const row = (x, depth) => {
     const [label, cls] = status(x);
@@ -1236,47 +1269,71 @@ function collaborationsHtml(today) {
   const tree = (x, depth) => row(x, depth) + steps.filter((y) => parentOf.get(y) === x).map((y) => tree(y, depth + 1)).join('');
   const tasks = new Map(); // the owner's conversation -> the steps that start its tasks
   for (const x of steps) if (!parentOf.get(x) && state.sessions.has(x.o.from)) tasks.set(x.o.from, [...(tasks.get(x.o.from) ?? []), x]);
+  // Every step under a task, its own and the ones passed on from it.
+  const under = (x) => [x, ...steps.filter((y) => parentOf.get(y) === x).flatMap(under)];
   const cards = [...tasks].map(([id, firsts]) => {
     const s = state.sessions.get(id);
     const last = Math.max(...firsts.map((x) => x.r.createdAt));
-    return { last, html: `<div class="wcard task"><button class="task-head" data-open="${esc(id)}">${avatar(s.deviceId, s.agentId, true)}
-      <span class="t"><b>${esc(s.title)}</b><span>${esc(friendName(s.deviceId, s.agentId))} · 最近派活 ${when(Math.floor(last / 1000))}</span></span></button>
-      ${firsts.map((x) => tree(x, 0)).join('')}</div>` };
-  }).sort((a, b) => b.last - a.last);
-  return cards.length ? '<div class="section">协作任务</div>' + cards.slice(0, 10).map((c) => c.html).join('') : '';
+    const all = firsts.flatMap(under);
+    const going = all.filter(live).length + (s.running || s.background > 0 ? 1 : 0);
+    // Folded (the owner tapped its title): its title line alone. Its picture opens the conversation.
+    const folded = state.workFolded.has(id);
+    const sub = folded ? t`${all.length} 步${going ? ` · ${going} 个在跑` : ''}` : t`最近派活 ${when(Math.floor(last / 1000))}`;
+    return { last, going, html: `<div class="wcard task${folded ? ' folded' : ''}"><div class="task-head"><button class="task-face" data-open="${esc(id)}">${avatar(s.deviceId, s.agentId, true)}</button>
+      <button class="task-fold" data-fold="${esc(id)}"><span class="t"><b>${going ? '<span class="dot run"></span>' : ''}${esc(s.title)}</b><span>${esc(friendName(s.deviceId, s.agentId))} · ${sub}</span></span>
+      <span class="chev">${folded ? '›' : '⌄'}</span></button></div>
+      ${folded ? '' : firsts.map((x) => tree(x, 0)).join('')}</div>` };
+  }).sort((a, b) => Boolean(b.going) - Boolean(a.going) || b.last - a.last); // tasks with work going on first
+  return cards.length ? t`<div class="section">协作任务</div>` + cards.slice(0, 10).map((c) => c.html).join('') : '';
 }
 
 function renderWork() {
   const sessions = visibleSessions();
   const approvals = [...state.approvals.values()].filter((a) => state.sessions.has(a.sessionId) && isFriend(state.sessions.get(a.sessionId))).sort((a, b) => b.ts - a.ts);
-  const running = sessions.filter((s) => s.running).sort((a, b) => b.updatedAt - a.updatedAt);
+  // At work: its turn running, or commands it left running in the background.
+  const busy = (s) => s.running || s.background > 0;
+  const running = sessions.filter(busy).sort((a, b) => b.updatedAt - a.updatedAt);
   const today = new Date().toDateString();
-  const done = sessions.filter((s) => !s.running && new Date(s.updatedAt * 1000).toDateString() === today).sort((a, b) => b.updatedAt - a.updatedAt);
+  const done = sessions.filter((s) => !busy(s) && new Date(s.updatedAt * 1000).toDateString() === today).sort((a, b) => b.updatedAt - a.updatedAt);
   const sessionRow = (s, side) => `<button class="item" data-open="${esc(s.id)}">${avatar(s.deviceId, s.agentId, true)}<span class="t"><b>${esc(s.title)}</b>
     <span>${esc(friendName(s.deviceId, s.agentId))} · ${esc(projectLabel(s))}${s.preview ? ' · ' + esc(s.preview) : ''}</span></span><span class="side">${side}</span></button>`;
-  let html = `<div class="stats"><div class="stat${approvals.length ? ' warn' : ''}"><span>待我处理</span><b>${approvals.length}</b></div>
+  let html = t`<div class="stats"><div class="stat${approvals.length ? ' warn' : ''}"><span>待我处理</span><b>${approvals.length}</b></div>
     <div class="stat"><span>进行中</span><b>${running.length}</b></div><div class="stat"><span>今天完成</span><b>${done.length}</b></div></div>`;
   if (approvals.length) {
-    html += '<div class="section">待我处理</div>';
+    html += t`<div class="section">待我处理</div>`;
     for (const a of approvals) {
       const s = state.sessions.get(a.sessionId);
       const plain = a.data.command && (a.data.kind === 'command' || a.data.kind === 'file') ? explainCommand(String(a.data.command)) : null;
-      const what = a.data.kind === 'question' ? '' : a.data.command
-        ? `${plain ? `<div class="plain${plain.risky ? ' risky' : ''}">${esc(plain.text)}</div>` : ''}<details class="raw"${plain ? '' : ' open'}><summary>查看原始命令</summary><code>${esc(a.data.command)}</code></details>`
+      const what = a.data.kind === 'question' ? '' : a.data.kind === 'delivery' ? `<div>${esc(a.data.reason || '')}</div>` : a.data.command
+        ? t`${plain ? `<div class="plain${plain.risky ? ' risky' : ''}">${esc(plain.text)}</div>` : ''}<details class="raw"${plain ? '' : ' open'}><summary>查看原始命令</summary><code>${esc(a.data.command)}</code></details>`
         : a.data.reason ? `<div>${esc(a.data.reason)}</div>` : '';
       html += `<div class="wcard"><b>${approvalTitle(a.data)}</b>${what}
-        <button class="link" data-open="${esc(a.sessionId)}">${esc(s ? `${friendName(s.deviceId, s.agentId)} · ${s.title}` : '打开对话')}</button>${approveButtons(a)}</div>`;
+        <button class="link" data-open="${esc(a.sessionId)}">${esc(s ? `${friendName(s.deviceId, s.agentId)} · ${s.title}` : t`打开对话`)}</button>${approveButtons(a)}</div>`;
     }
   }
   html += collaborationsHtml(today);
-  html += '<div class="section">进行中</div>' + (running.map((s) => sessionRow(s, '<span class="dot run"></span>')).join('') || '<div class="empty-note">没有正在运行的任务</div>');
-  html += '<div class="section">最近完成</div>' + (done.slice(0, 20).map((s) => sessionRow(s, when(s.updatedAt))).join('') || '<div class="empty-note">今天还没有完成的任务</div>');
+  html += t`<div class="section">进行中</div>` + (running.map((s) => sessionRow(s, s.running ? '<span class="dot run"></span>' : t`后台在跑`)).join('') || t`<div class="empty-note">没有正在运行的任务</div>`);
+  html += t`<div class="section">最近完成</div>` + (done.slice(0, 20).map((s) => sessionRow(s, when(s.updatedAt))).join('') || t`<div class="empty-note">今天还没有完成的任务</div>`);
   $('work').innerHTML = html;
 }
 
+// A task's title folds it to that line, or unfolds it; remembered on this phone.
+$('work').addEventListener('click', (e) => {
+  const fold = e.target.closest('[data-fold]');
+  if (!fold) return;
+  const id = fold.dataset.fold;
+  state.workFolded.has(id) ? state.workFolded.delete(id) : state.workFolded.add(id);
+  try {
+    localStorage.setItem('allinone.workFolded', JSON.stringify([...state.workFolded].slice(-100)));
+  } catch {
+    // private mode: kept for this visit
+  }
+  renderWork();
+});
+
 // ---------- results (all output files) ----------
 
-const FILTERS = [['all', '全部'], ['img', '图片'], ['video', '视频'], ['audio', '音频'], ['doc', '文档'], ['pdf', 'PDF'], ['code', '代码'], ['other', '其他']];
+const FILTERS = [['all', t`全部`], ['img', t`图片`], ['video', t`视频`], ['audio', t`音频`], ['doc', t`文档`], ['pdf', 'PDF'], ['code', t`代码`], ['other', t`其他`]];
 
 /**
  * One library view, used by the 资料库 page (all conversations) and by each conversation's own library.
@@ -1302,9 +1359,9 @@ function libraryHtml(files, filter, query, withSource) {
   const images = list.filter((a) => fileKind(a.data.mime, a.data.name) === 'img');
   const others = list.filter((a) => fileKind(a.data.mime, a.data.name) !== 'img');
   let html = '';
-  if (images.length) html += `<div class="section">图片</div><div class="grid">${images.map((a) => `<button class="tile" data-file="${esc(a.sessionId)}|${esc(a.itemId)}">
+  if (images.length) html += t`<div class="section">图片</div><div class="grid">${images.map((a) => `<button class="tile" data-file="${esc(a.sessionId)}|${esc(a.itemId)}">
     <img src="/files/${a.data.sha256}" alt="" loading="lazy"><div class="meta"><b>${esc(a.data.name)}</b><span>${esc(where(a))}</span></div></button>`).join('')}</div>`;
-  if (others.length) html += '<div class="section">文件</div>' + others.map((a) => `<button class="item" data-file="${esc(a.sessionId)}|${esc(a.itemId)}">${ficon(a)}
+  if (others.length) html += t`<div class="section">文件</div>` + others.map((a) => `<button class="item" data-file="${esc(a.sessionId)}|${esc(a.itemId)}">${ficon(a)}
     <span class="t"><b>${esc(a.data.name)}</b><span>${withSource ? esc(state.sessions.get(a.sessionId)?.title ?? '') + ' · ' : ''}${size(a.data.size)}</span></span><span class="side">${esc(where(a))}</span></button>`).join('');
   return { chips, html, empty: !files.length, none: !list.length };
 }
@@ -1313,8 +1370,8 @@ function renderFilesTab() {
   const files = [...state.artifacts.values()].filter((a) => state.sessions.has(a.sessionId) && isFriend(state.sessions.get(a.sessionId)));
   const lib = libraryHtml(files, state.filesFilter, state.filesQuery, true);
   $('files-filter').innerHTML = lib.chips;
-  $('files-all').innerHTML = lib.empty ? '<div class="empty-note">这里会汇总各个对话里 Agent 生成的文件。打开过的对话里的文件会出现在这里。</div>'
-    : lib.none ? '<div class="empty-note">没有符合条件的文件</div>' : lib.html;
+  $('files-all').innerHTML = lib.empty ? t`<div class="empty-note">这里会汇总各个对话里 Agent 生成的文件。打开过的对话里的文件会出现在这里。</div>`
+    : lib.none ? t`<div class="empty-note">没有符合条件的文件</div>` : lib.html;
 }
 
 $('files-filter').addEventListener('click', (e) => {
@@ -1330,7 +1387,7 @@ $('files-q').addEventListener('input', (e) => {
 
 // ---------- 网盘: the folder shared to every computer with Tailscale (Taildrive), opened through the hub ----------
 
-const drive = { path: [], entries: null, error: '', computer: '' };
+const drive = { path: [], entries: null, error: '', computer: '', pending: null };
 const drivePathParam = (parts) => encodeURIComponent('/' + parts.join('/'));
 
 async function loadDrive() {
@@ -1338,7 +1395,7 @@ async function loadDrive() {
   try {
     const res = await fetch(`/api/drive/list?path=${drivePathParam(drive.path)}`);
     const body = await res.json();
-    if (!res.ok) throw new Error(body.error || '打不开网盘');
+    if (!res.ok) throw new Error(body.error || t`打不开网盘`);
     [drive.entries, drive.computer] = [body.entries, body.computer];
   } catch (e) {
     [drive.entries, drive.error] = [null, e.message];
@@ -1354,16 +1411,19 @@ function driveItem(entry) {
 }
 
 function renderDrive() {
-  const crumbs = [`<button data-drive-to="0">网盘${drive.computer ? `（${esc(drive.computer)}）` : ''}</button>`,
+  // Files shared from another app, waiting for the owner to open the folder they go in.
+  $('drive-pending').hidden = !drive.pending?.length;
+  if (drive.pending?.length) $('drive-pending-text').textContent = t`${drive.pending.length} 个分享来的文件：打开要放的文件夹，再点「存到这里」`;
+  const crumbs = [t`<button data-drive-to="0">网盘${drive.computer ? `（${esc(drive.computer)}）` : ''}</button>`,
     ...drive.path.map((p, i) => `<span>›</span><button data-drive-to="${i + 1}">${esc(p)}</button>`)];
   $('drive-crumbs').innerHTML = crumbs.join('');
   if (drive.error) return void ($('drive').innerHTML = `<div class="empty-note">${esc(drive.error)}</div>`);
-  if (!drive.entries) return void ($('drive').innerHTML = '<div class="empty-note">正在打开…</div>');
-  if (!drive.entries.length) return void ($('drive').innerHTML = '<div class="empty-note">这个文件夹是空的</div>');
+  if (!drive.entries) return void ($('drive').innerHTML = t`<div class="empty-note">正在打开…</div>`);
+  if (!drive.entries.length) return void ($('drive').innerHTML = t`<div class="empty-note">这个文件夹是空的</div>`);
   $('drive').innerHTML = drive.entries.map((e, i) => {
     const icon = e.dir ? '<span class="ficon folder">📁</span>' : ficon(driveItem(e));
-    const meta = e.dir ? '文件夹' : size(e.size);
-    return `<div class="item drive-row"><button class="drive-open" data-drive-i="${i}">${icon}<span class="t"><b>${esc(e.name)}</b><span>${meta}</span></span>
+    const meta = e.dir ? t`文件夹` : size(e.size);
+    return t`<div class="item drive-row"><button class="drive-open" data-drive-i="${i}">${icon}<span class="t"><b>${esc(e.name)}</b><span>${meta}</span></span>
       <span class="side">${e.mtime ? esc(when(e.mtime / 1000)) : ''}</span></button><button class="drive-del" data-drive-del="${i}" aria-label="删除">×</button></div>`;
   }).join('');
 }
@@ -1373,11 +1433,75 @@ function showLib(mode) {
   for (const b of $('lib-tabs').querySelectorAll('[data-lib]')) b.classList.toggle('on', b.dataset.lib === mode);
   for (const el of document.querySelectorAll('.lib-chat')) el.hidden = mode !== 'chat';
   for (const el of document.querySelectorAll('.lib-drive')) el.hidden = mode !== 'drive';
+  for (const el of document.querySelectorAll('.lib-know')) el.hidden = mode !== 'know';
   if (mode === 'drive') {
     renderDrive();
     void loadDrive();
   }
+  if (mode === 'know') {
+    renderKnow();
+    void loadKnow();
+  }
 }
+
+// ---------- 员工守则 (the shared knowledge): what every agent shares (facts, lessons, the owner's rules); facts and lessons count at once, the owner takes back what is wrong ----------
+
+const know = { entries: null, error: '', query: '', open: new Set() };
+const KNOW_KIND = { fact: t`事实`, lesson: t`经验`, rule: t`规则` };
+
+async function loadKnow() {
+  know.error = '';
+  try {
+    const res = await fetch('/api/knowledge/list');
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || t`打不开员工守则`);
+    know.entries = body.entries;
+  } catch (e) {
+    [know.entries, know.error] = [null, e.message];
+  }
+  renderKnow();
+}
+
+function renderKnow() {
+  if (know.error) return void ($('know').innerHTML = `<div class="empty-note">${esc(know.error)}</div>`);
+  if (!know.entries) return void ($('know').innerHTML = t`<div class="empty-note">正在打开…</div>`);
+  const q = know.query.toLowerCase();
+  const list = know.entries.filter((e) => !q || [e.title, e.body, e.place, e.by, ...e.keys].some((s) => s.toLowerCase().includes(q)))
+    // newest first; rules (the handbook) after the rest, taken-back ones last
+    .sort((a, b) => Boolean(a.goneAt) - Boolean(b.goneAt) || (a.kind === 'rule') - (b.kind === 'rule') || b.at - a.at);
+  if (!list.length) return void ($('know').innerHTML = `<div class="empty-note">${know.entries.length ? t`没有符合条件的条目` : t`员工守则还是空的。Agent 查清楚的事会记在这里，所有电脑上的 Agent 都能查到`}</div>`);
+  $('know').innerHTML = list.map((e) => {
+    const action = e.kind === 'rule' ? '' : e.goneAt ? t`<button class="link" data-know-restore="${esc(e.id)}">恢复</button>`
+      : t`<button class="link" data-know-withdraw="${esc(e.id)}">撤掉</button>`;
+    const by = e.goneAt ? t`${e.goneBy || ''}撤掉了 · ${when(e.goneAt / 1000)}` : `${e.by} · ${when(e.at / 1000)}`;
+    return `<div class="know-entry${e.goneAt ? ' gone' : ''}${know.open.has(e.id) ? ' open' : ''}" data-know="${esc(e.id)}">
+      <div class="head"><b>${esc(e.title)}</b><span class="tag">${KNOW_KIND[e.kind] || ''} · ${esc(e.place || t`所有电脑`)}</span></div>
+      <div class="body">${esc(e.body)}</div><div class="foot"><span>${esc(by)}</span>${action}</div></div>`;
+  }).join('');
+}
+
+$('know-q').addEventListener('input', (e) => {
+  know.query = e.target.value.trim();
+  renderKnow();
+});
+
+$('know').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-know-withdraw],[data-know-restore]');
+  if (b) {
+    const withdraw = Boolean(b.dataset.knowWithdraw);
+    const id = b.dataset.knowWithdraw || b.dataset.knowRestore;
+    const entry = know.entries?.find((x) => x.id === id);
+    if (withdraw && !confirm(t`撤掉「${entry?.title ?? ''}」？各台电脑上的 Agent 都不会再看到它（7 天内可以恢复）。`)) return;
+    const res = await fetch(`/api/knowledge/${withdraw ? 'withdraw' : 'restore'}?id=${encodeURIComponent(id)}`, { method: 'POST' });
+    toast(res.ok ? (withdraw ? t`已撤掉` : t`已恢复`) : (await res.json().catch(() => ({}))).error || t`没有成功`);
+    return void loadKnow();
+  }
+  // Tapping an entry shows it whole.
+  const row = e.target.closest('[data-know]');
+  if (!row) return;
+  know.open.has(row.dataset.know) ? know.open.delete(row.dataset.know) : know.open.add(row.dataset.know);
+  row.classList.toggle('open');
+});
 
 $('lib-tabs').addEventListener('click', (e) => {
   const b = e.target.closest('[data-lib]');
@@ -1396,9 +1520,9 @@ $('drive').addEventListener('click', async (e) => {
   const del = e.target.closest('[data-drive-del]');
   if (del) {
     const entry = drive.entries?.[Number(del.dataset.driveDel)];
-    if (!entry || !confirm(`从网盘删除「${entry.name}」${entry.dir ? '和里面的所有文件' : ''}？各台电脑上都会没有，不能恢复。`)) return;
+    if (!entry || !confirm(t`从网盘删除「${entry.name}」${entry.dir ? t`和里面的所有文件` : ''}？各台电脑上都会没有，不能恢复。`)) return;
     const res = await fetch(`/api/drive/file?path=${drivePathParam([...drive.path, entry.name])}`, { method: 'DELETE' });
-    toast(res.ok ? '已删除' : (await res.json().catch(() => ({}))).error || '删除没有成功');
+    toast(res.ok ? t`已删除` : (await res.json().catch(() => ({}))).error || t`删除没有成功`);
     return void loadDrive();
   }
   const open = e.target.closest('[data-drive-i]');
@@ -1413,59 +1537,159 @@ $('drive').addEventListener('click', async (e) => {
 });
 
 $('drive-mkdir').addEventListener('click', async () => {
-  const name = (prompt('新文件夹的名字') || '').trim();
+  const name = (prompt(t`新文件夹的名字`) || '').trim();
   if (!name) return;
-  if (/[\\/]/.test(name)) return toast('名字里不能有斜杠');
+  if (/[\\/]/.test(name)) return toast(t`名字里不能有斜杠`);
   const res = await fetch(`/api/drive/mkdir?path=${drivePathParam([...drive.path, name])}`, { method: 'POST' });
-  toast(res.ok ? '已新建' : (await res.json().catch(() => ({}))).error || '没有成功');
+  toast(res.ok ? t`已新建` : (await res.json().catch(() => ({}))).error || t`没有成功`);
   void loadDrive();
 });
 
 $('drive-upload').addEventListener('click', () => $('drive-input').click());
-$('drive-input').addEventListener('change', async (e) => {
+$('drive-input').addEventListener('change', (e) => {
   const files = [...e.target.files];
   e.target.value = '';
+  void putToDrive(files);
+});
+
+/** Files into the folder the drive shows now. */
+async function putToDrive(files) {
   for (const [i, f] of files.entries()) {
-    toast(`正在上传 ${i + 1}/${files.length}：${f.name}`);
+    toast(t`正在上传 ${i + 1}/${files.length}：${f.name}`);
     const res = await fetch(`/api/drive/file?path=${drivePathParam([...drive.path, f.name])}`, { method: 'PUT', body: f });
-    if (!res.ok) toast(`「${f.name}」没有传上去：${(await res.json().catch(() => ({}))).error || res.status}`);
+    if (!res.ok) toast(t`「${f.name}」没有传上去：${(await res.json().catch(() => ({}))).error || res.status}`);
   }
-  if (files.length) toast('上传完了');
+  if (files.length) toast(t`上传完了`);
   void loadDrive();
+}
+
+// ---------- shared from another app (the phone's share sheet): into a conversation, as WeChat does, or into the drive ----------
+
+/**
+ * The Android shell holds what was shared and serves its files under /__shared/<n> (this page's own address, so they
+ * come as ordinary files). Asked for when the page starts and whenever something is shared while it runs.
+ */
+const share = { files: [], text: '', toDrive: null };
+
+window.onShared = async () => {
+  let got = null;
+  try {
+    got = JSON.parse(window.AllinOneNative?.takeShared?.() || 'null');
+  } catch {
+    // nothing shared
+  }
+  if (!got || (!got.files?.length && !got.text)) return;
+  share.text = got.text || '';
+  share.files = (await Promise.all(got.files.map(async (f, i) => {
+    try {
+      const blob = await (await fetch(`/__shared/${i}`)).blob();
+      return new File([blob], f.name, { type: f.mime || blob.type });
+    } catch {
+      toast(t`「${f.name}」读不出来`);
+      return null;
+    }
+  }))).filter(Boolean);
+  if (!share.files.length && !share.text) return;
+  $('share-q').value = '';
+  $('share').hidden = false;
+  renderShare();
+};
+
+function renderShare() {
+  const n = share.files.length;
+  const image = share.files.find((f) => f.type.startsWith('image/'));
+  $('share-what').innerHTML = (image ? `<img src="${URL.createObjectURL(image)}" alt="">` : '')
+    + `<span>${n ? t`${n} 个文件` : ''}${n && share.text ? '，' : ''}${share.text ? esc(share.text.slice(0, 60)) : ''}</span>`;
+  const q = $('share-q').value.trim().toLowerCase();
+  const list = [...state.sessions.values()].filter((s) => isFriend(s) && !isChannel(s)
+    && (!q || s.title.toLowerCase().includes(q) || friendName(s.deviceId, s.agentId).toLowerCase().includes(q)))
+    .sort((a, b) => (state.recent.indexOf(b.id) >= 0) - (state.recent.indexOf(a.id) >= 0) || b.updatedAt - a.updatedAt).slice(0, 40);
+  $('share-list').innerHTML = (n ? t`<button class="thread-row" data-share-drive="1"><span class="t"><b>存到网盘</b><span>选一个文件夹，各台电脑都能用</span></span></button>` : '')
+    + t`<div class="section">发给对话</div>`
+    + (list.map((s) => `<button class="thread-row" data-share-to="${esc(s.id)}">${avatar(s.deviceId, s.agentId)}<span class="t"><b>${esc(s.title)}</b>
+      <span>${esc(friendName(s.deviceId, s.agentId))} · ${when(s.updatedAt)}</span></span></button>`).join('') || t`<div class="empty-note">没有匹配的对话</div>`);
+}
+
+$('share-q').addEventListener('input', renderShare);
+$('share').addEventListener('click', (e) => {
+  if (e.target.id === 'share' || e.target.closest('#share-cancel')) {
+    $('share').hidden = true;
+    return;
+  }
+  const to = e.target.closest('[data-share-to]');
+  if (to) {
+    // Into the conversation's composer, as files picked there would be: a word can go with them before sending.
+    $('share').hidden = true;
+    open(to.dataset.shareTo);
+    addFiles(share.files);
+    if (share.text) input.value = input.value ? `${input.value}\n${share.text}` : share.text;
+    input.dispatchEvent(new Event('input'));
+    input.focus();
+    return;
+  }
+  if (e.target.closest('[data-share-drive]')) {
+    // The drive opens; the owner goes to the folder and puts them there.
+    $('share').hidden = true;
+    drive.pending = share.files;
+    setTab('library');
+    showLib('drive');
+  }
+});
+
+void window.onShared(); // shared before the page was up (the app was started by sharing)
+
+$('drive-here').addEventListener('click', () => {
+  const files = drive.pending || [];
+  drive.pending = null;
+  renderDrive();
+  void putToDrive(files);
+});
+$('drive-here-cancel').addEventListener('click', () => {
+  drive.pending = null;
+  renderDrive();
 });
 
 // ---------- friend profile and settings (shown in the right pane) ----------
 
 function renderProfile(key) {
   const f = friends(true).find((x) => x.key === key);
-  if (!f) return '<div class="empty-note">这位好友已不存在</div>';
+  if (!f) return t`<div class="empty-note">这位好友已不存在</div>`;
   const device = state.devices.get(f.deviceId);
   const groups = projectGroups(key, f.sessions).filter((g) => g.id);
-  return `<div class="profile"><div class="head"><button class="face" id="avatar-pick" title="换头像">${avatar(f.deviceId, f.agentId)}<span class="edit">换头像</span></button>
+  return t`<div class="profile"><div class="head"><button class="face" id="avatar-pick" title="换头像">${avatar(f.deviceId, f.agentId)}<span class="edit">换头像</span></button>
       <div><b>${esc(friendName(f.deviceId, f.agentId))}</b>
       <span>${esc(deviceName(f.deviceId))} 上的 ${esc(agentLabel(f.deviceId, f.agentId))}</span>
-      ${f.avatar ? '<button class="link" id="avatar-reset">恢复默认头像</button>' : ''}</div></div>
-    <input type="file" id="avatar-file" accept="image/*" hidden>
+      ${f.avatar ? t`<button class="link" id="avatar-reset">恢复默认头像</button>` : ''}</div></div>
     <div class="field"><span class="k">昵称</span><input id="remark" maxlength="40" placeholder="${esc(deviceName(f.deviceId))}" value="${esc(f.remark || '')}"><button class="btn plain" id="remark-save">保存</button></div>
-    <div class="field"><span class="k">状态</span><span>${device?.online ? '在线' : `离线${device?.lastSeen ? ' · 最后在线 ' + when(device.lastSeen / 1000) : ''}`}${device?.isHub ? ' · 主电脑' : ''}</span></div>
-    <div class="field"><span class="k">项目</span><span>${groups.length} 个${groups.length ? '：' + esc(groups.slice(0, 4).map((g) => g.name).join('、')) + (groups.length > 4 ? ' 等' : '') : ''}</span></div>
-    <div class="field"><span class="k">对话</span><span>${f.sessions.length} 个${f.running ? ' · 有任务正在运行' : ''}</span></div>
+    <div class="field"><span class="k">状态</span><span>${device?.online ? t`在线` : t`离线${device?.lastSeen ? t` · 最后在线 ` + when(device.lastSeen / 1000) : ''}`}${device?.isHub ? t` · 主电脑` : ''}</span></div>
+    <div class="field"><span class="k">项目</span><span>${groups.length} 个${groups.length ? t`：` + esc(groups.slice(0, 4).map((g) => g.name).join(t`、`)) + (groups.length > 4 ? t` 等` : '') : ''}</span></div>
+    <div class="field"><span class="k">对话</span><span>${f.sessions.length} 个${f.running ? t` · 有任务正在运行` : ''}</span></div>
     <label class="setting"><span class="t">消息免打扰<div class="fmeta">它的对话做完时不再提醒，未读只显示灰点；审批仍会提醒，因为它在等你回答</div></span>
       <input type="checkbox" class="switch" data-mute-friend="${esc(key)}" ${f.muted ? 'checked' : ''}></label>
     <label class="setting"><span class="t">接收其他 Agent 的消息<div class="fmeta">关掉后，其他 Agent 不能经 AgentChat 给它派活</div></span>
       <input type="checkbox" class="switch" data-accept="${esc(key)}" ${state.friends.get(key)?.acceptAgents !== false ? 'checked' : ''}></label>
-    <div class="buttons">${f.added ? `<button class="btn" data-message="${esc(key)}">发消息</button><button class="btn danger" data-remove="${esc(key)}">删除好友</button>`
-      : `<button class="btn" data-add="${esc(key)}">添加到通讯录</button>`}</div></div>`;
+    <div class="buttons">${f.added ? t`<button class="btn" data-message="${esc(key)}">发消息</button><button class="btn danger" data-remove="${esc(key)}">删除好友</button>`
+      : t`<button class="btn" data-add="${esc(key)}">添加到通讯录</button>`}</div></div>`;
 }
 
 /**
  * A new picture for a friend: cut to a square, shrunk to 256 px, uploaded to the hub like any file, then named as its
  * avatar. The hub keeps it, so every phone shows it and it outlives updates and reinstalls.
  */
+let avatarFor = null; // the friend whose picture is being picked (the pane may show another by the time it comes)
+$('avatar-file').addEventListener('change', (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (file && avatarFor) void setAvatar(avatarFor, file);
+});
+
 async function setAvatar(key, file) {
-  if (!file || !file.type.startsWith('image/')) return;
+  // Some galleries hand pictures over without a type: try it as a picture all the same, and say so if it is not one.
+  if (file.type && !file.type.startsWith('image/')) return toast(t`请选一张图片`);
   try {
-    const img = await createImageBitmap(file);
+    const img = await createImageBitmap(file).catch(() => {
+      throw new Error(t`这张图片的格式打不开，换一张试试（比如截图或 JPG）`);
+    });
     const side = Math.min(img.width, img.height);
     const canvas = document.createElement('canvas');
     canvas.width = canvas.height = 256;
@@ -1475,25 +1699,25 @@ async function setAvatar(key, file) {
     const body = await res.json();
     if (!res.ok || !body.sha256) throw new Error(body.error || `HTTP ${res.status}`);
     sendFriend(key, { avatar: body.sha256 });
-    toast('头像已更换');
+    toast(t`头像已更换`);
   } catch (e) {
-    toast(`换头像没有成功：${e.message}`);
+    toast(t`换头像没有成功：${e.message}`);
   }
 }
 
 function renderSettings() {
   const devices = [...state.devices.values()].filter((d) => d.approved).sort((a, b) => Number(b.isHub) - Number(a.isHub) || Number(b.online) - Number(a.online));
-  let html = '<div class="section">电脑</div>' + (devices.map((d) => {
+  let html = t`<div class="section">电脑</div>` + (devices.map((d) => {
     const running = [...state.sessions.values()].filter((s) => s.deviceId === d.id && s.running && !isChannel(s)).length;
-    const sub = d.online ? [d.agents.map((a) => a.label).join('、') || '没有 Agent', running ? `${running} 个运行中` : ''].filter(Boolean).join(' · ')
-      : `离线${d.lastSeen ? ' · 最后在线 ' + when(d.lastSeen / 1000) : ''}`;
-    return `<div class="item"><span class="dot ${d.online ? 'on' : ''}"></span><span class="t"><b>${esc(d.name)}</b><span>${esc(sub)}</span></span>${d.isHub ? '<span class="tag hub">主电脑</span>' : ''}</div>`;
-  }).join('') || '<div class="empty-note">还没有电脑</div>');
+    const sub = d.online ? [d.agents.map((a) => a.label).join(t`、`) || t`没有 Agent`, running ? t`${running} 个运行中` : ''].filter(Boolean).join(' · ')
+      : t`离线${d.lastSeen ? t` · 最后在线 ` + when(d.lastSeen / 1000) : ''}`;
+    return `<div class="item"><span class="dot ${d.online ? 'on' : ''}"></span><span class="t"><b>${esc(d.name)}</b><span>${esc(sub)}</span></span>${d.isHub ? t`<span class="tag hub">主电脑</span>` : ''}</div>`;
+  }).join('') || t`<div class="empty-note">还没有电脑</div>`);
   if (state.hubSettings?.newVersion) {
-    html += `<div class="section">更新</div><div class="setting"><span class="t">有新版本 ${esc(state.hubSettings.newVersion)}<div class="fmeta">主电脑会先更新，其他电脑自动跟上</div></span>
+    html += t`<div class="section">更新</div><div class="setting"><span class="t">有新版本 ${esc(state.hubSettings.newVersion)}<div class="fmeta">主电脑会先更新，其他电脑自动跟上</div></span>
       <button class="btn" id="install-update">更新</button></div>`;
   }
-  html += `<div class="section">Agent 互通</div>
+  html += t`<div class="section">Agent 互通</div>
     <label class="setting"><span class="t">允许 Agent 之间互相派活<div class="fmeta">关掉后，所有 Agent 经 AgentChat 发给其他 Agent 的消息都会被拦下</div></span>
       <input type="checkbox" class="switch" data-hub-set="agentLinks" ${state.hubSettings?.agentLinks !== false ? 'checked' : ''}></label>
     <label class="setting"><span class="t">做完自动汇报<div class="fmeta">派出去的活做完后，对方的汇报自动发回派活的那个对话，它会接着往下做</div></span>
@@ -1505,8 +1729,8 @@ function renderSettings() {
     } catch {
       // older app without settings
     }
-    html += `<div class="section">这部手机</div>
-      <label class="setting"><span class="t">在电脑前时，不提醒手机<div class="fmeta">你正在用哪台电脑，提醒就弹在那台电脑的右下角；离开几分钟后再发到手机</div></span>
+    html += t`<div class="section">这部手机</div>
+      <label class="setting"><span class="t">在电脑前时，不提醒手机<div class="fmeta">在电脑前时手机不响，电脑上也不弹窗；离开几分钟后再发到手机。等你处理的审批不管在哪都会发到手机</div></span>
         <input type="checkbox" class="switch" data-hub-set="followMe" ${state.hubSettings?.followMe !== false ? 'checked' : ''}></label>
       <label class="setting"><span class="t">完成与审批提醒</span><input type="checkbox" class="switch" data-set="notify" ${s.notify !== false ? 'checked' : ''}></label>
       <label class="setting"><span class="t">免打扰时段<div class="fmeta">期间提醒静音，仍会出现在通知栏</div></span><input type="checkbox" class="switch" data-set="quiet" ${s.quiet ? 'checked' : ''}></label>
@@ -1514,7 +1738,7 @@ function renderSettings() {
       <button class="setting" id="rescan" style="width:100%;text-align:left"><span class="t">重新扫码配对</span><span class="link">›</span></button>
       <div class="setting"><span class="t">版本</span><span class="fmeta">${esc(s.version || '')}</span></div>`;
   } else {
-    html += `<div class="section">这部手机</div><div class="empty-note">在浏览器里使用时没有后台提醒。${/Android/i.test(navigator.userAgent) ? '<br><a class="link" href="/app.apk">安装 App</a>' : ''}</div>`;
+    html += t`<div class="section">这部手机</div><div class="empty-note">在浏览器里使用时没有后台提醒。${/Android/i.test(navigator.userAgent) ? t`<br><a class="link" href="/app.apk">安装 App</a>` : ''}</div>`;
   }
   return html;
 }
@@ -1524,7 +1748,6 @@ $('right-body').addEventListener('change', (e) => {
   if (e.target.dataset.hubSet) return send({ t: 'settings', settings: { [e.target.dataset.hubSet]: e.target.checked } });
   if (e.target.dataset.accept) return sendFriend(e.target.dataset.accept, { acceptAgents: e.target.checked });
   if (e.target.dataset.muteFriend) return sendFriend(e.target.dataset.muteFriend, { muted: e.target.checked });
-  if (e.target.id === 'avatar-file') return void setAvatar(state.right.key, e.target.files?.[0]);
   if (!native || !e.target.dataset.set) return;
   const s = JSON.parse(native.getSettings());
   s[e.target.dataset.set] = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
@@ -1538,18 +1761,21 @@ $('right-body').addEventListener('click', (e) => {
   if (t.id === 'install-update') {
     send({ t: 'installUpdate' });
     t.disabled = true;
-    t.textContent = '更新中…';
-    return toast('正在更新，几分钟后自动重新连接');
+    t.textContent = t`更新中…`;
+    return toast(t`正在更新，几分钟后自动重新连接`);
   }
-  if (t.closest('#avatar-pick')) return $('avatar-file').click();
+  if (t.closest('#avatar-pick')) {
+    avatarFor = state.right.key;
+    return $('avatar-file').click();
+  }
   if (t.id === 'avatar-reset') return sendFriend(state.right.key, { avatar: null });
   if (t.id === 'remark-save') {
     sendFriend(state.right.key, { remark: $('remark').value.trim() || null });
-    toast('备注已保存');
+    toast(t`备注已保存`);
     return;
   }
   if (t.dataset.add) return sendFriend(t.dataset.add, { added: true });
-  if (t.dataset.remove && confirm('删除这位好友？它的对话会从项目和聊天里隐藏，可以随时在「新的朋友」里重新添加。')) {
+  if (t.dataset.remove && confirm(t`删除这位好友？它的对话会从项目和聊天里隐藏，可以随时在「新的朋友」里重新添加。`)) {
     sendFriend(t.dataset.remove, { added: false });
     return $('right-back').click();
   }
@@ -1557,7 +1783,7 @@ $('right-body').addEventListener('click', (e) => {
     const f = friends().find((x) => x.key === t.dataset.message);
     const target = state.sessions.get(state.friendLast[f?.key]) || f?.latest;
     if (target) open(target.id);
-    else toast('这位好友还没有对话');
+    else toast(t`这位好友还没有对话`);
   }
 });
 
@@ -1578,7 +1804,7 @@ function renderRight() {
   if (r.mode !== 'browser') native?.browserHide?.(); // other content takes the pane: the browser steps aside
   if (r.mode === 'profile' || r.mode === 'settings') {
     const body = $('right-body');
-    $('right-title').textContent = r.mode === 'profile' ? '详细资料' : '设置';
+    $('right-title').textContent = r.mode === 'profile' ? t`详细资料` : t`设置`;
     clearTabs('');
     $('right-open').hidden = true;
     // Do not redraw under the user's fingers while they type a remark.
@@ -1606,34 +1832,34 @@ function renderRight() {
     else if (kind === 'video') body.innerHTML = `<div class="pview"><video src="${url}" controls playsinline preload="metadata"></video></div>${actions}`;
     else if (kind === 'audio') body.innerHTML = `<div class="pview"><div class="paudio"><span class="ficon audio">${esc((a.data.name.split('.').pop() || '').slice(0, 4).toUpperCase())}</span><b>${esc(a.data.name)}</b><audio src="${url}" controls preload="metadata"></audio></div></div>${actions}`;
     else if (kind === 'pdf' || a.data.mime.startsWith('text/') || a.data.mime === 'application/json') body.innerHTML = `<div class="pview"><iframe src="${url}" title="${esc(a.data.name)}"></iframe></div>${actions}`;
-    else body.innerHTML = `<div class="pview"><div class="hint">无法直接预览<br><a class="link" href="${url}" download="${esc(a.data.name)}">下载 ${esc(a.data.name)}（${size(a.data.size)}）</a></div></div>${actions}`;
+    else body.innerHTML = t`<div class="pview"><div class="hint">无法直接预览<br><a class="link" href="${url}" download="${esc(a.data.name)}">下载 ${esc(a.data.name)}（${size(a.data.size)}）</a></div></div>${actions}`;
     return;
   }
   delete $('right-body').dataset.sha;
   $('right-open').hidden = true;
   $('right').dataset.sub = '';
   if (!s || (state.tab === 'library' && trifold())) {
-    $('right-title').textContent = state.tab === 'library' ? '预览' : '资料库';
+    $('right-title').textContent = state.tab === 'library' ? t`预览` : t`资料库`;
     clearTabs('');
     $('right-body').innerHTML = state.tab === 'library'
-      ? calm('files', '选择一个文件', '在左边点任意文件，这里直接预览')
-      : calm('files', '选择一个对话', '对话里 Agent 生成的图片和文件会汇总在这里');
+      ? calm('files', t`选择一个文件`, t`在左边点任意文件，这里直接预览`)
+      : calm('files', t`选择一个对话`, t`对话里 Agent 生成的图片和文件会汇总在这里`);
     return;
   }
   // A conversation: its own library, with the same kinds as the 资料库 page.
   const files = sortedItems(s.id).filter((i) => i.kind === 'artifact' && !isWorkFile(i));
   const lib = libraryHtml(files, r.filter || 'all', r.q || '', false);
-  $('right-title').textContent = files.length ? `资料库 · ${files.length}` : '资料库';
+  $('right-title').textContent = files.length ? t`资料库 · ${files.length}` : t`资料库`;
   // Keep the search box (and the keyboard) while the list below refreshes.
   if ($('right-tabs').dataset.session !== s.id || !$('right-q')) {
     $('right-tabs').dataset.session = s.id;
-    $('right-tabs').innerHTML = `<div class="search" style="padding-top:8px"><input id="right-q" type="search" placeholder="搜索这个对话的文件"></div><div id="right-chips" class="chips"></div>`;
+    $('right-tabs').innerHTML = t`<div class="search" style="padding-top:8px"><input id="right-q" type="search" placeholder="搜索这个对话的文件"></div><div id="right-chips" class="chips"></div>`;
     $('right-q').value = r.q || '';
   }
   $('right-chips').innerHTML = lib.chips;
   $('right-tabs').hidden = lib.empty;
-  $('right-body').innerHTML = lib.empty ? calm('files', '还没有文件', 'Agent 在这个对话里生成的图片和文件会汇总在这里')
-    : lib.none ? '<div class="empty-note">没有符合条件的文件</div>' : lib.html;
+  $('right-body').innerHTML = lib.empty ? calm('files', t`还没有文件`, t`Agent 在这个对话里生成的图片和文件会汇总在这里`)
+    : lib.none ? t`<div class="empty-note">没有符合条件的文件</div>` : lib.html;
   syncBrowser();
 }
 
@@ -1663,13 +1889,13 @@ function conversationLinks(s) {
 function renderBrowser(s) {
   const body = $('right-body');
   const b = state.browser;
-  $('right-title').textContent = '浏览器';
+  $('right-title').textContent = t`浏览器`;
   $('right-open').hidden = true;
   delete body.dataset.sha;
   clearTabs(state.current ? '1' : ''); // opened from the conversation: ‹ returns to its library
   if (body.dataset.mode !== 'browser') {
     body.dataset.mode = 'browser';
-    body.innerHTML = `<div class="browser">
+    body.innerHTML = t`<div class="browser">
       <div class="browser-bar">
         <button class="bnav" data-bnav="back" aria-label="后退">‹</button>
         <button class="bnav" data-bnav="forward" aria-label="前进">›</button>
@@ -1682,10 +1908,10 @@ function renderBrowser(s) {
   const slot = $('browser-slot');
   if (!b.url) {
     const links = conversationLinks(s);
-    slot.innerHTML = `<div class="browser-start">${links.length ? '<div class="section">这个对话里的链接</div>' + links.map((u) => `<button class="item" data-go="${esc(u)}"><span class="t"><b>${esc(u.replace(/^https?:\/\//, '').split('/')[0])}</b><span>${esc(u)}</span></span></button>`).join('')
-      : calm('chat', '打开一个网页', '在上面输入网址，或点对话里的链接。登录过的网站会记住登录状态。')}</div>`;
+    slot.innerHTML = `<div class="browser-start">${links.length ? t`<div class="section">这个对话里的链接</div>` + links.map((u) => `<button class="item" data-go="${esc(u)}"><span class="t"><b>${esc(u.replace(/^https?:\/\//, '').split('/')[0])}</b><span>${esc(u)}</span></span></button>`).join('')
+      : calm('chat', t`打开一个网页`, t`在上面输入网址，或点对话里的链接。登录过的网站会记住登录状态。`)}</div>`;
   } else if (!native && !slot.querySelector('iframe')) {
-    slot.innerHTML = `<iframe src="${esc(b.url)}" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+    slot.innerHTML = t`<iframe src="${esc(b.url)}" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
       <a class="browser-out link" href="${esc(b.url)}" target="_blank" rel="noopener">在新窗口打开 ›</a>`;
   }
   const input = $('browser-url');
@@ -1792,8 +2018,8 @@ function openNatively(item) {
 /** Save (to the phone's gallery or downloads), share with another app, open in another app: the app's own; a browser downloads. */
 function fileActions() {
   return native?.saveFile
-    ? '<button data-fa="save">保存到手机</button><button data-fa="share">分享</button><button data-fa="other">用其他应用打开</button>'
-    : '<button data-fa="save">下载</button>';
+    ? t`<button data-fa="save">保存到手机</button><button data-fa="share">分享</button><button data-fa="other">用其他应用打开</button>`
+    : t`<button data-fa="save">下载</button>`;
 }
 
 function fileAction(what, item) {
@@ -1819,9 +2045,9 @@ const viewer = (() => {
   const el = document.createElement('div');
   el.id = 'viewer';
   el.hidden = true;
-  el.innerHTML = `<div class="vstage"><img alt=""></div>
+  el.innerHTML = t`<div class="vstage"><img alt=""></div>
     <div class="vbar"><button data-v="close" aria-label="关闭">✕</button><span class="vname"></span>
-    <button data-v="rotate">旋转</button><button data-fa="save">${native?.saveFile ? '保存' : '下载'}</button>${native?.shareFile ? '<button data-fa="share">分享</button>' : ''}</div>`;
+    <button data-v="rotate">旋转</button><button data-fa="save">${native?.saveFile ? t`保存` : t`下载`}</button>${native?.shareFile ? t`<button data-fa="share">分享</button>` : ''}</div>`;
   document.body.append(el);
   const stage = el.querySelector('.vstage');
   const img = el.querySelector('img');
@@ -1991,7 +2217,7 @@ function nextUnread() {
     const s = state.sessions.get(r.dataset.open);
     return s && isUnread(s);
   });
-  if (!rows.length) return toast('没有未读消息');
+  if (!rows.length) return toast(t`没有未读消息`);
   const offset = (r) => r.getBoundingClientRect().top - list.getBoundingClientRect().top; // from the list's visible top
   const next = rows.find((r) => offset(r) > 4) ?? rows[0];
   list.scrollTo({ top: list.scrollTop + offset(next), behavior: 'smooth' });

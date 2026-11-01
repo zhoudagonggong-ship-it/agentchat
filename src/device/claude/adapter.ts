@@ -45,16 +45,27 @@ function saveLearnedUi(v: { claudeSend?: string[] }): void {
 }
 // A message for a desktop conversation waits this long for the window (locked screen, a draft, a busy window).
 const WINDOW_WAIT_MS = 2 * 3_600_000;
-// Only these leave the window out: no desktop app running, or a conversation it does not list. Nothing to bypass then.
-const CLI_ONLY = new Set(['no_window', 'not_listed']);
+// What keeps a message from the window that the owner has to look at: the app not running, the conversation not
+// opening, two of its name. Never gone around (a turn run behind the window is unseen there and lacks what the owner
+// allowed in it): the phone shows a card, and the message waits, tried again meanwhile, for as long as it takes.
+const STUCK = new Set(['no_window', 'not_listed', 'not_opened', 'ambiguous']);
+const STUCK_WHY: Record<string, string> = {
+  no_window: 'Claude 桌面 App 没有打开',
+  not_listed: '在 Claude 窗口里打不开这个对话',
+  not_opened: '在 Claude 窗口里打不开这个对话',
+  ambiguous: 'Claude 窗口里有两个同名的对话，分不清是哪个',
+  window_unavailable: '等了两个小时还是送不进窗口',
+};
 // What keeps a message out of the window for the owner's sake: they are using the computer, have a draft in the box,
 // or the conversation still runs. The owner is told, and may say to send it in now.
 const OWNER_WAITS = new Set(['in_use', 'busy', 'draft']);
 // Claude Code ends a hook after 600 s; give up on the phone a little before.
 const HOOK_WAIT_MS = 590_000;
 
-interface Meta { cliSessionId: string; cwd: string | null; title: string | null; archived: boolean; activity: number }
+interface Meta { cliSessionId: string; localId: string; cwd: string | null; title: string | null; archived: boolean; activity: number }
 interface PendingAsk { threadId: string; item: Item; answer(decision: string, answers?: Record<string, string>): void }
+/** A message waiting on the owner's card (see stuck): what they chose, null until they do. */
+interface Stuck { choice: 'retry' | 'cli' | 'drop' | null; close(state: string): void }
 
 /** Milliseconds since the last key press or mouse move on this computer. */
 function idleMs(): Promise<number> {
@@ -228,7 +239,7 @@ export class ClaudeCodeAdapter implements Adapter {
       const text = withAttachments(command.text ?? '', command.files ?? []);
       // A desktop conversation: always typed into the desktop app itself, as the owner would, which then stays its
       // only writer. A message written behind its back would be unseen there until the app restarts, and fork the
-      // conversation. Only with no desktop app running, or a conversation it does not list, does the CLI continue it.
+      // conversation. Only when the owner says so (on the card for one that cannot go in) does the CLI continue it.
       const title = this.meta.get(threadId)?.title;
       let fallback = false;
       if (title) {
@@ -267,10 +278,11 @@ export class ClaudeCodeAdapter implements Adapter {
   }
 
   /**
-   * Types the message into the desktop app's window, waiting (and trying again every 8 s, for up to two hours) while
-   * that cannot be done right now: the screen is locked, the owner has a draft in the box, the window is busy.
-   * Messages for one conversation keep their order. Resolves false when only the CLI can carry it: no desktop app
-   * running, or the conversation is not in its list; the receipt is then the caller's.
+   * Types the message into the desktop app's window, waiting (and trying again every 8 s) while that cannot be done
+   * right now: the screen is locked, the owner has a draft in the box, the window is busy. One that cannot go in for a
+   * reason the owner has to look at (STUCK, or two hours of waiting) gets a card on the phone and waits for as long as
+   * it takes, still tried meanwhile. Messages for one conversation keep their order. Resolves false when the owner said
+   * to send it from behind the window (the CLI); the receipt is then the caller's.
    */
   private sendInWindow(threadId: string, title: string, text: string, requestId: string, who: string): Promise<boolean> {
     const previous = this.windowQueues.get(threadId) ?? Promise.resolve(true);
@@ -281,37 +293,26 @@ export class ClaudeCodeAdapter implements Adapter {
       let told = false;
       let lastReason = '';
       let now = false; // the owner said: send it in now
+      let card: Stuck | null = null;
+      const done = (state: string) => card?.close(state);
       for (;;) {
         // Sent already, by the owner pressing Send on what we put in the box, say: done, never a second time.
         if (this.inTranscript(threadId, text, since)) {
           this.sink.receipt(requestId, 'accepted');
+          done('sent');
           return true;
         }
-        // Its turn still running (its transcript says so): wait without going near the window at all, unless the
-        // owner said to send it now (the app then queues it for after the turn, as pressing Enter there does).
-        let running = false;
-        try {
-          running = this.files.has(threadId) && this.describe(threadId).running;
-        } catch {
-          running = false; // being rewritten: let the window tell
-        }
-        const ui = running && !now ? { ok: false, reason: 'busy' } : await this.desktopSend(title, text, now);
+        // A turn still running does not hold it back: the app hands a message sent now to the running turn.
+        const link = this.meta.get(threadId)?.localId;
+        const ui = await this.desktopSend(title, link ? `claude://claude.ai/epitaxy/${link}` : '', text, now);
         if (ui.ok) {
           this.sink.receipt(requestId, 'accepted');
+          done('sent');
           log('claude', `desktop send ok: ${title}`);
           // Typed into another conversation's box (a pane that had not caught up, say), it never shows up here.
           setTimeout(() => {
             if (!this.inTranscript(threadId, text, since)) log('claude', `desktop send: not in ${title}'s transcript 15 s later, it may have gone into another conversation`);
           }, 15_000);
-          return true;
-        }
-        if (CLI_ONLY.has(ui.reason)) {
-          log('claude', `desktop send not possible (${ui.reason}): ${title}; using the CLI`);
-          return false;
-        }
-        if (ui.reason === 'ambiguous') {
-          // Two conversations of this name in the sidebar: which one to type into is not ours to guess.
-          this.sink.receipt(requestId, 'failed', undefined, 'ambiguous_title');
           return true;
         }
         // None of the buttons looked like send: the app changed. Ask the model once which one it is now, then try again.
@@ -324,15 +325,25 @@ export class ClaudeCodeAdapter implements Adapter {
           told = true;
           this.sink.receipt(requestId, 'pending', undefined, 'waiting_for_window');
         }
-        // Waiting on the owner (at the keyboard, a draft in the box, the turn running): the owner hears of it.
+        // Waiting on the owner (at the keyboard, a draft in the box, the turn running): counted in the tray's menu.
         const h = OWNER_WAITS.has(ui.reason) ? hold(requestId, who, title, ui.reason) : null;
-        if (Date.now() > deadline) {
-          this.sink.receipt(requestId, 'failed', undefined, 'window_unavailable');
+        // Something the owner has to see to: better the message waits for them than goes some other way.
+        const why = STUCK_WHY[ui.reason] ?? (Date.now() > deadline ? STUCK_WHY.window_unavailable : null);
+        if (why && !card) card = this.stuck(threadId, who, title, why);
+        if (card?.choice === 'cli') {
+          done('cli');
+          log('claude', `desktop send not possible (${ui.reason}): ${title}; the owner said to use the CLI`);
+          return false;
+        }
+        if (card?.choice === 'drop') {
+          done('dropped');
+          this.sink.receipt(requestId, 'failed', undefined, 'dropped_by_owner');
           return true;
         }
+        if (card?.choice === 'retry') [card.choice, now] = [null, true];
         // A look at the window every 8 s only (the box is left alone meanwhile), at once when the owner says so.
-        for (let i = 0; i < 8 && !(h?.now && !now); i++) await new Promise((r) => setTimeout(r, 1_000));
-        now = h?.now ?? now;
+        for (let i = 0; i < 8 && !(h?.now && !now) && !card?.choice; i++) await new Promise((r) => setTimeout(r, 1_000));
+        now = h?.now || now;
       }
     });
     this.windowQueues.set(threadId, run);
@@ -583,7 +594,7 @@ export class ClaudeCodeAdapter implements Adapter {
       // Back at the keyboard: hand it to the computer (a question shows there only once the hook is done).
       const watcher = setInterval(() => void idleMs().then((ms) => ms < BACK_MS && finish(null, 'elsewhere')), 3000);
       this.asks.set(approvalId, { threadId, item, answer: (decision, answers) => {
-        const accept = decision === 'accept';
+        const accept = decision === 'accept' || decision === 'acceptForSession';
         if (!question) {
           return finish({ hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: accept ? { behavior: 'allow' }
             : { behavior: 'deny', message: '在手机上被拒绝' } } }, accept ? 'accepted' : 'declined');
@@ -601,10 +612,46 @@ export class ClaudeCodeAdapter implements Adapter {
     });
   }
 
-  /** One at a time: each send drives the same desktop window. */
-  private desktopSend(title: string, text: string, now = false): Promise<{ ok: boolean; reason: string; row?: RowButton[] }> {
+  /**
+   * A card on the phone for a message that cannot go into the window: the owner's choice is read by the waiting send
+   * (try again, send it from behind the window, drop it). It stays until the message went one way or the other.
+   */
+  private stuck(threadId: string, who: string, title: string, why: string): Stuck {
+    const approvalId = `cl${Date.now().toString(36)}${(this.askSeq++).toString(36)}`;
+    const from = who === '你在手机上发的' ? '你在手机上发的消息' : `${who} 发来的消息`;
+    const item: Item = { itemId: `approval:${approvalId}`, turnId: null, kind: 'approval_request', ts: Date.now(), data: { approvalId, kind: 'delivery',
+      command: null, cwd: null, reason: `${from}送不进「${title}」：${why}。`, state: 'pending',
+      questions: [{ key: 'q0', title: '怎么处理？', description: '在电脑上处理好后点「再试一次」；它也会每隔几秒自己再试，送进去了这张卡片就消失。', custom: false, options: [
+        { value: 'retry', label: '我处理好了，再试一次', description: '' },
+        { value: 'cli', label: '从后台送进去', description: '要重启 Claude 才在窗口里看得到；后台那一轮也没有你在窗口里允许过的权限' },
+        { value: 'drop', label: '这条不送了', description: '' }] }] } };
+    const card: Stuck = {
+      choice: null,
+      close: (state) => {
+        if (!this.asks.delete(approvalId)) return;
+        item.data = { ...item.data, state };
+        this.sink.items(threadId, [item]);
+      },
+    };
+    this.asks.set(approvalId, { threadId, item, answer: (decision, answers) => {
+      const v = answers?.q0;
+      card.choice = decision !== 'accept' ? null : v === 'cli' || v === 'drop' ? v : 'retry';
+      // Tried again and still not in: the card comes back with its choices (the phone showed it answered).
+      if (card.choice === 'retry') setTimeout(() => {
+        if (!this.asks.has(approvalId)) return;
+        item.data = { ...item.data, tries: Number(item.data.tries ?? 0) + 1 };
+        this.sink.items(threadId, [item]);
+      }, 20_000);
+    } });
+    log('claude', `a message for ${title} cannot go in (${why}); waiting for the owner, a card on the phone`);
+    this.sink.items(threadId, [item]);
+    return card;
+  }
+
+  /** One at a time: each send drives the same desktop window. `link`: the conversation's own (claude://…). */
+  private desktopSend(title: string, link: string, text: string, now = false): Promise<{ ok: boolean; reason: string; row?: RowButton[] }> {
     const run = this.uiQueue.then(() => new Promise<{ ok: boolean; reason: string; row?: RowButton[] }>((resolve) => {
-      const payload = Buffer.from(JSON.stringify({ title, text, now, sendNames: learnedUi().claudeSend }), 'utf8').toString('base64');
+      const payload = Buffer.from(JSON.stringify({ title, link, text, now, sendNames: learnedUi().claudeSend }), 'utf8').toString('base64');
       // On stdin, not the command line: a long message would not fit there (spawn ENAMETOOLONG).
       const child = execFile('powershell.exe', ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', DESKTOP_SEND],
         { windowsHide: true, timeout: 60_000 }, (error, stdout, stderr) => {
@@ -641,7 +688,7 @@ export class ClaudeCodeAdapter implements Adapter {
             try {
               const j = JSON.parse(readFileSync(join(userDir, f), 'utf8'));
               if (typeof j.cliSessionId === 'string') {
-                meta.set(j.cliSessionId, { cliSessionId: j.cliSessionId, cwd: j.cwd ?? null, title: j.title ?? null,
+                meta.set(j.cliSessionId, { cliSessionId: j.cliSessionId, localId: f.slice(0, -'.json'.length), cwd: j.cwd ?? null, title: j.title ?? null,
                   archived: Boolean(j.isArchived), activity: Number(j.lastActivityAt) || 0 });
               }
             } catch {

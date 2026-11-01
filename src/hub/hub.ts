@@ -8,7 +8,7 @@ import { extname, join, normalize } from 'node:path';
 import { promisify } from 'node:util';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { AgentInfo, AppToHub, Attachment, Command, DeviceToHub, DeviceView, HubRef, HubSettings, HubToApp, HubToDevice, Item, MemberSeed, Origin, RequestState, RequestView, SessionView } from '../shared/protocol.ts';
-import { HUB_LOCAL_PORT, HUB_PORT, MAX_ATTACHMENTS, MAX_UPLOAD_BYTES, PROTOCOL_VERSION, markTag, requestText, sessionKey } from '../shared/protocol.ts';
+import { HISTORY_MS, HUB_LOCAL_PORT, HUB_PORT, MAX_ATTACHMENTS, MAX_UPLOAD_BYTES, PROTOCOL_VERSION, markTag, requestText, sessionKey } from '../shared/protocol.ts';
 import { log, parseJson, sha256 } from '../shared/util.ts';
 import { activity } from '../activity.ts';
 import { LocalTransport } from '../link.ts';
@@ -16,6 +16,7 @@ import { Store } from './store.ts';
 import type { Ledger } from './ledger.ts';
 import { Relay, isChannelTitle, returnedMarks } from './relay.ts';
 import { Drive } from './drive.ts';
+import { Knowledge } from './knowledge.ts';
 import { VoiceWords } from './voice-words.ts';
 import { buildPackage } from '../update.ts';
 import { fileSha256 } from '../handover.ts';
@@ -35,16 +36,21 @@ const PRESENT_MS = 3 * 60_000;
 const VOICE_MAX_MS = 5 * 60_000; // a listening box left open longer than this is forgotten: the next press starts anew
 const HANDOVER_WAIT_MS = 30 * 60_000; // how long the old hub waits for the new one to say it has all its data
 const REPLICA_EVERY_MS = 2_000; // how often the record's changes go out to the other computers
-const REPLICA_BATCH_BYTES = 4 * 1024 * 1024;
+// Small: on a slow line (office-pc, 35 KB/s in the evening) a 4 MB batch took minutes and held the link's pings
+// behind it, so the computer was dropped and fed the same batch again, for ever. The copy keeps up with small ones.
+const REPLICA_BATCH_BYTES = 128 * 1024;
 const FILES_EVERY_MS = 3 * 60_000; // how often a hub lacking files of its record asks the other computers for them
 const CATCH_UP_MS = 15_000; // stepping down: how long the next hub gets to take in the last changes
+const FORGET_EVERY_MS = 3_600_000; // how often history is let go (see HISTORY_MS)
+const FORGET_BATCH = 2_000; // items let go at once, so the other computers' copies follow in small steps
+const COMPACT_OVER = 16 * 1024 * 1024;
 /** A computer before this one in line, back and caught up for this long (and nothing running on either), takes the duty back. */
 const RECLAIM_AFTER_MS = 5 * 60_000;
 const run = promisify(execFile);
 
 /** Changes whenever the page files change, so open phones know to reload. */
 function webVersion(): string {
-  return sha256(['index.html', 'app.js', 'style.css'].map((f) => {
+  return sha256(['index.html', 'app.js', 'style.css', 'i18n.js', 'i18n-en.js'].map((f) => {
     try {
       return `${f}:${statSync(join(WEB_DIR, f)).mtimeMs}`;
     } catch {
@@ -85,6 +91,8 @@ export class Hub {
   /** The owner asked (on the phone) to install the new release; the program around the hub does it. */
   onInstallUpdate: () => void = () => {};
   private readonly drive = new Drive();
+  /** What every agent shares: facts, lessons, the owner's rules (knowledge.ts). */
+  private readonly knowledge: Knowledge;
   private readonly noticeWaiters = new Set<() => void>();
 
   private readonly dataDir: string;
@@ -108,9 +116,10 @@ export class Hub {
       this.store.skipSeq(1_000_000);
     }
     this.term = Number(this.store.setting('term')) || 1;
+    this.knowledge = new Knowledge(this.store.db);
     this.replica = new ReplicaSource(this.store.db, dataDir);
     if (seeds.length) this.store.seedMembers(seeds);
-    this.relay = new Relay({ store: this.store, hubId, devices: this.devices, settings: () => this.settings(),
+    this.relay = new Relay({ store: this.store, knowledge: this.knowledge, hubId, devices: this.devices, settings: () => this.settings(),
       submit: (...a) => this.submit(...a), putItems: (s, i) => this.putItems(s, i), notice: (n) => this.notice(n),
       resend: (id, attempt) => this.forward(id, null, attempt), fail: (id, error) => this.updateRequest(id, 'failed', null, error) });
     this.voiceWords = new VoiceWords(this.store, () => this.store.devices(new Set(this.devices.keys()), this.hubId)
@@ -186,13 +195,10 @@ export class Hub {
   }
 
   private notice(n: Omit<Notice, 'seq' | 'at'>): void {
-    // Reminders follow the owner: at one of the computers, they show there and the phone stays quiet.
-    const at = this.settings().followMe ? this.ownerAt() : null;
-    if (at) {
-      const url = `https://${this.hubDns}:${HUB_PORT}/${n.sessionId ? `#s=${encodeURIComponent(n.sessionId)}` : ''}`;
-      this.devices.get(at)?.send({ t: 'alert', title: n.title, text: n.text, url });
-      return;
-    }
+    // The owner at one of the computers sees the rest there, and the phone stays quiet; nothing pops up on the
+    // computer (the owner found those bubbles more noise than help). What waits for them (approvals, a message that
+    // cannot go in) always reaches the phone.
+    if (n.type !== 'approval' && this.settings().followMe && this.ownerAt()) return;
     this.notices.push({ ...n, seq: ++this.noticeSeq, at: Date.now() });
     if (this.notices.length > 200) this.notices.shift();
     for (const wake of this.noticeWaiters) wake();
@@ -313,6 +319,29 @@ export class Hub {
     }, REPLICA_EVERY_MS);
     setTimeout(() => this.askFiles(), 30_000); // the computers have connected again by then
     setInterval(() => this.askFiles(), FILES_EVERY_MS);
+    setTimeout(() => this.forget(), 60_000);
+  }
+
+  /**
+   * Lets history go (see HISTORY_MS): items a batch at a time, a few seconds apart while there is more, so the
+   * changes reach the other computers in small steps; then requests, files and the room they took. Then again in an hour.
+   */
+  private forget(went = 0): void {
+    if (this.leaving) return;
+    const cutoff = Date.now() - HISTORY_MS;
+    try {
+      const n = this.store.forgetItems(cutoff, FORGET_BATCH);
+      if (n === FORGET_BATCH) return void setTimeout(() => this.forget(went + n), 3 * REPLICA_EVERY_MS);
+      const requests = this.store.forgetRequests(cutoff);
+      const files = this.store.forgetFiles(cutoff);
+      const compacted = this.store.compact(COMPACT_OVER);
+      if (went + n || requests || files.files) {
+        log('hub', `history let go: ${went + n} items, ${requests} requests, ${files.files} files (${(files.bytes / 1048576).toFixed(1)} MB)${compacted ? ', record compacted' : ''}`);
+      }
+    } catch (e) {
+      log('hub', `letting history go failed: ${(e as Error).message}`);
+    }
+    setTimeout(() => this.forget(), FORGET_EVERY_MS);
   }
 
   /**
@@ -498,6 +527,7 @@ export class Hub {
     const url = new URL(req.url ?? '/', 'http://hub');
     if (req.method === 'POST' && url.pathname === '/api/upload') return void this.upload(req, url, res);
     if (this.drive.handle(req, url, res)) return;
+    if (this.knowledge.handle(req, url, res, (what) => activity(`手机上${what}`))) return;
     if (req.method !== 'GET') return void res.writeHead(405).end();
     if (url.pathname === '/api/info') {
       // Lets other computers find out which machine is the hub.
@@ -621,6 +651,14 @@ export class Hub {
       this.devices.delete(conn.deviceId);
       activity(`「${this.store.device(conn.deviceId)?.name}」已离线`, 'warn');
       this.broadcastDevices();
+      // The computer listening went away mid-sentence (restarted for an update, say): what was said is lost, and the
+      // box where the owner speaks says so instead of listening on for ever.
+      if (this.voice?.mic === conn.deviceId) {
+        const { target } = this.voice;
+        this.voice = null;
+        this.devices.get(target)?.send({ t: 'voice', op: 'show', text: '收音的电脑断开了，这句没收到，请重新按 Win+Alt+空格 再说一遍', tone: 'bad', done: true });
+        log('voice', `${this.store.device(conn.deviceId)?.name} went away while listening`);
+      }
     }
     if (this.pending.get(conn.deviceId) === conn) this.pending.delete(conn.deviceId);
     this.onChange();
@@ -695,7 +733,12 @@ export class Hub {
       }
       case 'items': {
         const id = sessionKey(deviceId, msg.agentId, msg.threadId);
-        const changed = this.store.upsertItems(id, msg.items);
+        // An approval in work another agent handed over waits for that agent, not the owner (relay.ts routeFor).
+        const marked = msg.items.map((item) => {
+          const route = this.relay.routeFor(id, item);
+          return route ? { ...item, data: { ...item.data, ...(route.escalated ? { escalatedFrom: route.to } : { routedTo: route.to }) } } : item;
+        });
+        const changed = this.store.upsertItems(id, this.store.notHistory(id, marked, Date.now() - HISTORY_MS));
         conn.send({ t: 'ack', oid: msg.oid });
         if (changed.length) this.broadcast({ t: 'items', sessionId: id, items: changed });
         this.touchFrom(id, changed);
@@ -733,7 +776,7 @@ export class Hub {
             const requestId = this.ledger.forTurn(id, item.turnId);
             if (requestId) this.relay.handoffFailed(id, requestId, String(item.data.error ?? '这一轮执行失败'));
           }
-          if (item.kind === 'approval_request' && item.data.state === 'pending') {
+          if (item.kind === 'approval_request' && item.data.state === 'pending' && !item.data.routedTo) {
             this.notice({ type: 'approval', sessionId: id, title, text: String(item.data.command ?? item.data.reason ?? '需要你确认') });
           }
         }
@@ -882,7 +925,7 @@ export class Hub {
         }
         if (typeof msg.settings?.followMe === 'boolean') {
           this.store.setSetting('followMe', msg.settings.followMe ? '1' : '0');
-          activity(msg.settings.followMe ? '已打开：在电脑前时提醒弹在电脑上，手机不响' : '已关闭：提醒都发到手机');
+          activity(msg.settings.followMe ? '已打开：在电脑前时手机不响（审批照样发到手机）' : '已关闭：提醒都发到手机');
         }
         if (msg.settings && 'voiceMic' in msg.settings) {
           // Only a computer that belongs here; null lets each computer listen with its own microphone.
@@ -978,7 +1021,7 @@ export class Hub {
     }
     const text = typeof command.text === 'string' ? command.text : '';
     if (command.op === 'send' && ((!text.trim() && !files.length) || text.length > MAX_TEXT)) return fail('消息为空或过长');
-    if (command.op === 'approve' && (typeof command.approvalId !== 'string' || !['accept', 'decline', 'cancel'].includes(command.decision ?? ''))) return fail('审批参数无效');
+    if (command.op === 'approve' && (typeof command.approvalId !== 'string' || !['accept', 'acceptForSession', 'decline', 'cancel'].includes(command.decision ?? ''))) return fail('审批参数无效');
     let answers: Record<string, string> | undefined;
     if (command.op === 'approve' && command.answers !== undefined) {
       const entries = command.answers && typeof command.answers === 'object' ? Object.entries(command.answers) : [];
@@ -986,12 +1029,19 @@ export class Hub {
       answers = Object.fromEntries(entries) as Record<string, string>;
     }
     if (!['send', 'interrupt', 'approve'].includes(command.op)) return fail('不支持的操作');
+    // Rules for the conversation, set by the agent handing it work (relay.ts checked them).
+    const rules = command.op === 'send' && Array.isArray(command.rules) && command.rules.length ? command.rules : undefined;
+    const note = command.op === 'approve' && typeof command.note === 'string' && command.note.trim() ? command.note.trim().slice(0, MAX_TEXT) : undefined;
+    // The model and reasoning level the conversation works with from this message on (an agent handing work over asked).
+    const word = (v: unknown) => command.op === 'send' && typeof v === 'string' && /^[\w./:@-]{1,100}$/.test(v.trim()) ? v.trim() : undefined;
+    const model = word(command.model);
+    const effort = word(command.effort);
 
     const online = this.devices.has(session.deviceId);
     // Only messages wait for an offline device; stopping or approving later would act on a stale turn.
     const state: RequestState = online ? 'pending' : command.op === 'send' ? 'queued' : 'failed';
     const clean: Command = { requestId: command.requestId, op: command.op, text: command.op === 'send' ? text : undefined,
-      files: files.length ? files : undefined, approvalId: command.approvalId, decision: command.decision, answers, origin };
+      files: files.length ? files : undefined, approvalId: command.approvalId, decision: command.decision, answers, origin, rules, note, model, effort };
     const { view, created } = this.ledger.create(command.requestId, sessionId, command.op, clean,
       command.op === 'send' ? requestText(text, files) : null, state, handoffFrom);
     if (!created) return { view, created };

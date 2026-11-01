@@ -13,7 +13,10 @@ export function toolCommand(agentId: string): { command: string; args: string[] 
 /** What every agent should know about AgentChat, in a new conversation or on a new computer alike. */
 export const AGENT_HINT = [
   '## AgentChat',
-  '这台电脑装了 AgentChat。你有它的工具 allinone（agents / send / wait / read / stop），可以联系主人其他电脑上的 Agent（Codex、Claude Code、OpenCode、Goose、DSH）：',
+  '这台电脑装了 AgentChat。你有它的工具 allinone（agents / send / wait / read / stop / know / learn / approve），可以联系主人其他电脑上的 Agent（Codex、Claude Code、OpenCode、Goose、DSH）：',
+  '- 谁派活谁负责：你派出去的活，规矩由你定（send 的 rules），对方过程中的请示也由你批（approve），主人只看结果。对方的请示会以「…的请示」发到你的对话。',
+  '- 所有 Agent 共用一本知识库：各台电脑装了什么、东西放在哪、踩过的坑、主人的协作手册。开工前，凡是要用到某台电脑上的东西（模型、软件、目录），先用 know 查，'
+    + '不要只凭自己的记忆或搜几个目录就说「没有」。查清楚的新情况、发现写错的，用 learn 记下来或改正，别的 Agent 马上就知道。',
   '- 主人让你把事情交给另一台电脑上的 Agent、问它、或看它在做什么时，用这些工具，不要用 SSH 或其他办法直接去调对方。',
   '- 先用 agents 看有哪些 Agent 和对话；优先发到主人正在用的已有对话里。主人要对方开一个新的工作对话时，用 send 的 title 给它起名。',
   '- 对方在另一台电脑上，看不到你这里的文件：要它用的文件，放进 send 的 files（本机路径），它会收到一份；它做出来的文件也会随汇报带回给你。',

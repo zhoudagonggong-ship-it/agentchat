@@ -17,6 +17,11 @@ final class Hubs {
 
   private Hubs() {}
 
+  /** The app's own words in the phone's language: Chinese on a Chinese phone, English elsewhere (as the page does). */
+  static String L(String zh, String en) {
+    return "zh".equals(java.util.Locale.getDefault().getLanguage()) ? zh : en;
+  }
+
   private static SharedPreferences prefs(Context c) {
     return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
   }

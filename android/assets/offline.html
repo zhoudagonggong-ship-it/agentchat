@@ -31,6 +31,7 @@
     </div>
     <p style="margin: 18px 0 0"><a href="scan.html" style="color:#07c160;text-decoration:none">换了主电脑？重新扫码配对</a></p>
   </div>
+  <script src="i18n.js"></script>
   <script>
     // Says why the hub cannot be reached, as far as the phone can tell, and offers the one step that fixes it.
     const native = window.AllinOneNative;
@@ -43,9 +44,9 @@
     function render() {
       state = native && native.tailscaleState ? native.tailscaleState() : 'on';
       const [title, text, button] = COPY[state];
-      document.getElementById('title').textContent = title;
-      document.getElementById('text').textContent = text;
-      document.getElementById('main').textContent = button;
+      document.getElementById('title').textContent = L(title);
+      document.getElementById('text').textContent = L(text);
+      document.getElementById('main').textContent = L(button);
       const battery = Boolean(native && native.batterySettings) && state !== 'missing';
       document.getElementById('battery').hidden = !battery;
       const selfFree = !battery || native.batteryFree();

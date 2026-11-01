@@ -386,6 +386,16 @@ input, textarea { font: inherit; color: inherit; }
 /* 协作任务: the owner's conversation, then each hand-off under it. */
 .wcard.task { border-color: var(--line); padding: 8px 8px 4px; }
 .task-head, .wcard .step { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 6px 4px; border-radius: 8px; }
+/* The title of a task: its picture opens the conversation, the rest folds the task to this line. */
+.task-head { padding: 0; gap: 0; }
+.task-face { flex: none; padding: 6px 6px 6px 4px; border-radius: 8px; }
+.task-fold { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; text-align: left; padding: 6px 4px; border-radius: 8px; }
+.task-fold:hover, .task-face:hover { background: var(--hover); }
+.task-fold .t { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.task-fold .t span { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-fold .t b .dot { margin-right: 6px; vertical-align: middle; }
+.task-fold .chev { flex: none; color: var(--muted); font-size: 18px; width: 20px; text-align: center; }
+.wcard.task.folded { padding-bottom: 8px; }
 .wcard .step { padding-left: 14px; }
 .task-head:hover, .wcard .step:hover { background: var(--hover); }
 .task-head .t, .wcard .step .t { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -415,7 +425,29 @@ details.raw summary { font-size: 12px; color: var(--muted); cursor: pointer; }
 /* 网盘 */
 .lib-tabs { padding-top: 2px; }
 .drive-bar { display: flex; align-items: center; gap: 12px; padding: 0 16px 8px; }
-.drive-bar[hidden], .lib-drive[hidden], .lib-chat[hidden] { display: none; }
+.drive-bar[hidden], .lib-drive[hidden], .lib-chat[hidden], .lib-know[hidden] { display: none; }
+/* shared from another app */
+.share-sheet { position: fixed; z-index: 20; }
+.share-head { display: flex; align-items: center; padding: 4px 16px 8px; }
+.share-head b { flex: 1; font-size: 16px; }
+.share-what { display: flex; align-items: center; gap: 10px; padding: 0 16px 8px; font-size: 13px; color: var(--muted); }
+.share-what img { width: 48px; height: 48px; object-fit: cover; border-radius: 8px; flex: none; }
+.share-sheet .thread-row .face { flex: none; }
+.drive-pending { display: flex; align-items: center; gap: 10px; margin: 0 16px 8px; padding: 8px 12px; border-radius: 10px; background: var(--accent-soft); font-size: 13px; }
+.drive-pending[hidden] { display: none; }
+.drive-pending span { flex: 1; min-width: 0; }
+.drive-pending .btn { flex: none; }
+/* 员工守则 (the shared knowledge) */
+.know-entry { padding: 10px 16px; border-bottom: 1px solid var(--line, rgba(0,0,0,.06)); }
+.know-entry.gone { opacity: .5; }
+.know-entry .head { display: flex; align-items: baseline; gap: 8px; }
+.know-entry .head b { flex: 1; min-width: 0; font-weight: 500; }
+.know-entry .tag { flex: none; font-size: 12px; color: var(--accent); }
+.know-entry .body { margin-top: 4px; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 4.5em; overflow: hidden; }
+.know-entry.open .body { max-height: none; }
+.know-entry .foot { display: flex; align-items: center; gap: 12px; margin-top: 4px; font-size: 12px; color: var(--muted); }
+.know-entry .foot span { flex: 1; min-width: 0; }
+.know-entry .foot .link { flex: none; font-size: 13px; }
 .crumbs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; overflow-x: auto; scrollbar-width: none; font-size: 13px; color: var(--muted); }
 .crumbs button { flex: none; max-width: 10em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent); }
 .crumbs button:last-child { color: inherit; font-weight: 500; }

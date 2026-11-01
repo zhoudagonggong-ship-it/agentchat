@@ -1,7 +1,7 @@
 ﻿# Sends a message into a conversation open in the Claude desktop app, the way typing it there would:
 # opens the conversation in the sidebar, fills the prompt box and presses Send, all through Windows UI
 # Automation patterns (no mouse or keyboard). The desktop app stays the only writer of its conversation.
-#   -Payload  base64 of UTF-8 JSON {"title": "...", "text": "...", "sendNames": ["..."]}
+#   -Payload  base64 of UTF-8 JSON {"title": "...", "link": "claude://…", "text": "...", "sendNames": ["..."]}
 #             sendNames: names the send button was found to have in a newer app (learned, see the adapter).
 # Prints one JSON line: {"ok":true} or {"ok":false,"reason":"...","row":[...]}; `row`: the buttons on the box's row
 # when none of them looked like send, so the adapter can find out which one is.
@@ -66,10 +66,18 @@ public static uint IdleMs() { var i = new LASTINPUTINFO(); i.cbSize = (uint)Mars
   if (-not (IsOpen)) {
     if (-not $req.now -and [AllinOne.Input]::IdleMs() -lt 30000) { Done $false 'in_use' }
     $back = OpenTitle
-    $n = OpenEntry $req.title
-    if ($n -eq 0) { Done $false 'not_listed' }
-    if ($n -gt 1) { Done $false 'ambiguous' }
     $opened = $false
+    # By the conversation's own link (claude://…/local_…), as the app opens it from anywhere: whatever the sidebar shows
+    # (hidden, a folder folded, another of the same name). The sidebar entry only when that does not open it.
+    if ($req.link) {
+      Start-Process ([string]$req.link)
+      for ($i = 0; $i -lt 50 -and -not $opened; $i++) { Start-Sleep -Milliseconds 200; $opened = IsOpen }
+    }
+    if (-not $opened) {
+      $n = OpenEntry $req.title
+      if ($n -eq 0) { Done $false 'not_listed' }
+      if ($n -gt 1) { Done $false 'ambiguous' }
+    }
     for ($i = 0; $i -lt 50 -and -not $opened; $i++) { Start-Sleep -Milliseconds 200; $opened = IsOpen }
     if (-not $opened) { Done $false 'not_opened' }
     # The title bar changes before the rest of the pane: for a moment the prompt box is still the previous
@@ -111,8 +119,6 @@ public static uint IdleMs() { var i = new LASTINPUTINFO(); i.cbSize = (uint)Mars
   if (& $flat $vp.Current.Value) { Finish $false 'draft' }
   # An empty box holds one line break; setting '' does not clear it, setting that line break does.
   $clear = { $vp.SetValue("`n") }
-  # A turn is running (Stop shows on the box's row): do not touch the box at all, so the owner sees nothing typed
-  # and cleared again; the message waits and goes in once the turn has ended.
   # The buttons on the box's own bottom row (add, send or stop, voice). The box grows upward with a long message, so
   # its bottom edge places the row, and only buttons within its width count (the window has other panes beside it).
   # The voice button always sits on that row, right of send, however tall a long message makes the box (which may even
@@ -125,8 +131,7 @@ public static uint IdleMs() { var i = new LASTINPUTINFO(); i.cbSize = (uint)Mars
     $y = if ($mic) { $mic.Current.BoundingRectangle.Y + $mic.Current.BoundingRectangle.Height / 2 } else { $r.Bottom - 14 }
     @($all | Where-Object { $b = $_.Current.BoundingRectangle; [Math]::Abs(($b.Y + $b.Height / 2) - $y) -lt 20 })
   }
-  # Unless the owner said to send it now: the app then queues it for after the turn, as pressing Enter there does.
-  if (-not $req.now -and @(RowButtons | Where-Object { $_.Current.Name -eq '停止' }).Count) { Finish $false 'busy' }
+  # A turn still running is no reason to wait: sent now, the app hands it to the running turn, which reads it as it goes.
   $vp.SetValue([string]$req.text)
   # The box takes a moment to show what was set, longer while the window is busy.
   $want = & $flat $req.text

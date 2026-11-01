@@ -37,7 +37,7 @@ public class NotifyService extends Service {
     Notification ongoing = new Notification.Builder(this, CH_ONGOING)
         .setSmallIcon(R.drawable.ic_notify)
         .setContentTitle("AgentChat")
-        .setContentText("在后台接收完成提醒")
+        .setContentText(Hubs.L("在后台接收完成提醒", "Receiving alerts in the background"))
         .setOngoing(true)
         .setContentIntent(open(null, 0))
         .build();
@@ -93,7 +93,7 @@ public class NotifyService extends Service {
     // In quiet hours the reminder still appears, but on the silent channel.
     Notification n = new Notification.Builder(this, quiet ? CH_QUIET : CH_MESSAGES)
         .setSmallIcon(R.drawable.ic_notify)
-        .setContentTitle((approval ? "需要你审批 · " + event.optString("title") : event.optString("title")) + (count > 1 ? "（" + count + " 条）" : ""))
+        .setContentTitle((approval ? Hubs.L("需要你审批 · ", "Approval needed · ") + event.optString("title") : event.optString("title")) + (count > 1 ? Hubs.L("（" + count + " 条）", " (" + count + ")") : ""))
         .setNumber(count)
         .setBadgeIconType(Notification.BADGE_ICON_SMALL)
         .setContentText(event.optString("text"))
@@ -113,11 +113,11 @@ public class NotifyService extends Service {
 
   private void channels() {
     NotificationManager nm = getSystemService(NotificationManager.class);
-    NotificationChannel ongoing = new NotificationChannel(CH_ONGOING, "后台连接", NotificationManager.IMPORTANCE_MIN);
+    NotificationChannel ongoing = new NotificationChannel(CH_ONGOING, Hubs.L("后台连接", "Background connection"), NotificationManager.IMPORTANCE_MIN);
     ongoing.setShowBadge(false);
     nm.createNotificationChannel(ongoing);
-    nm.createNotificationChannel(new NotificationChannel(CH_MESSAGES, "完成与审批提醒", NotificationManager.IMPORTANCE_HIGH));
-    nm.createNotificationChannel(new NotificationChannel(CH_QUIET, "免打扰时段的提醒", NotificationManager.IMPORTANCE_LOW));
+    nm.createNotificationChannel(new NotificationChannel(CH_MESSAGES, Hubs.L("完成与审批提醒", "Finished turns and approvals"), NotificationManager.IMPORTANCE_HIGH));
+    nm.createNotificationChannel(new NotificationChannel(CH_QUIET, Hubs.L("免打扰时段的提醒", "Alerts in quiet hours"), NotificationManager.IMPORTANCE_LOW));
   }
 
   private static void sleep(long ms) {

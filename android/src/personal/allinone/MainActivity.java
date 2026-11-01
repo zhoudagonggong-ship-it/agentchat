@@ -119,7 +119,7 @@ public class MainActivity extends Activity {
         Intent pick = new Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
             .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE);
         try {
-          startActivityForResult(Intent.createChooser(pick, "选择图片或文件"), REQ_FILES);
+          startActivityForResult(Intent.createChooser(pick, Hubs.L("选择图片或文件", "Pick pictures or files")), REQ_FILES);
         } catch (Exception e) {
           fileCallback = null;
           return false;
@@ -140,6 +140,11 @@ public class MainActivity extends Activity {
         }
         startActivity(new Intent(Intent.ACTION_VIEW, uri)); // ordinary links open in the browser
         return true;
+      }
+
+      @Override
+      public android.webkit.WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+        return sharedResponse(request.getUrl());
       }
 
       @Override
@@ -200,8 +205,113 @@ public class MainActivity extends Activity {
     handle(intent);
   }
 
-  /** Pairing links and notification taps. Returns true when it took care of loading. */
+  // ---------- shared from another app ----------
+
+  /** What was shared last, until the page takes it: files copied into the cache (the sender's grant ends with it). */
+  private final java.util.List<JSONObject> sharedFiles = new java.util.ArrayList<>();
+  private final java.util.List<File> sharedData = new java.util.ArrayList<>();
+  private String sharedText = null;
+  private boolean shareWaiting = false;
+
+  private static final long MAX_SHARE = 25L * 1024 * 1024; // what a message may carry
+
+  /** Copies what another app shared, then tells the page (which asks for it when it starts, too). */
+  @SuppressWarnings("deprecation") // the typed getters need Android 13; this app runs from Android 11
+  private void takeShare(Intent intent) {
+    java.util.List<Uri> uris = new java.util.ArrayList<>();
+    if (Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction())) {
+      java.util.ArrayList<android.os.Parcelable> list = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+      if (list != null) for (android.os.Parcelable p : list) if (p instanceof Uri) uris.add((Uri) p);
+    } else if (intent.getParcelableExtra(Intent.EXTRA_STREAM) instanceof Uri) {
+      uris.add((Uri) intent.getParcelableExtra(Intent.EXTRA_STREAM));
+    }
+    String text = intent.getStringExtra(Intent.EXTRA_TEXT);
+    String subject = intent.getStringExtra(Intent.EXTRA_SUBJECT);
+    new Thread(() -> {
+      File dir = new File(getCacheDir(), "shared");
+      java.util.List<JSONObject> files = new java.util.ArrayList<>();
+      java.util.List<File> data = new java.util.ArrayList<>();
+      if (dir.exists()) for (File old : dir.listFiles()) old.delete();
+      dir.mkdirs();
+      for (Uri uri : uris.subList(0, Math.min(uris.size(), 9))) {
+        String name = displayName(uri);
+        String mime = getContentResolver().getType(uri);
+        File file = new File(dir, data.size() + "-" + safeName(name));
+        long size = 0;
+        try (InputStream in = getContentResolver().openInputStream(uri); FileOutputStream out = new FileOutputStream(file)) {
+          byte[] buf = new byte[65536];
+          for (int n; (n = in.read(buf)) > 0; ) {
+            size += n;
+            if (size > MAX_SHARE) throw new Exception("too big");
+            out.write(buf, 0, n);
+          }
+        } catch (Exception e) {
+          file.delete();
+          final String why = size > MAX_SHARE ? Hubs.L("超过 25 MB", "is over 25 MB") : Hubs.L("读不出来", "could not be read");
+          runOnUiThread(() -> toast(Hubs.L("「" + name + "」" + why + "，没有收", "\"" + name + "\" " + why + "; left out")));
+          continue;
+        }
+        try {
+          files.add(new JSONObject().put("name", name).put("mime", mime != null ? mime : "application/octet-stream").put("size", size));
+          data.add(file);
+        } catch (Exception ignored) {
+          // JSON of plain strings does not fail
+        }
+      }
+      String said = text != null ? (subject != null && !text.contains(subject) ? subject + "\n" + text : text) : null;
+      runOnUiThread(() -> {
+        synchronized (sharedFiles) {
+          sharedFiles.clear();
+          sharedFiles.addAll(files);
+          sharedData.clear();
+          sharedData.addAll(data);
+          sharedText = said;
+          shareWaiting = !files.isEmpty() || said != null;
+        }
+        String current = web.getUrl();
+        String hub = Hubs.hubUrl(this);
+        if (hub == null) toast(Hubs.L("请先和主电脑配对", "Pair with the main computer first"));
+        else if (current != null && current.startsWith(hub)) web.evaluateJavascript("window.onShared && window.onShared()", null);
+        else loadHub(null); // the page asks for it once it is up
+      });
+    }).start();
+  }
+
+  private String displayName(Uri uri) {
+    try (android.database.Cursor c = getContentResolver().query(uri, new String[] {android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+      if (c != null && c.moveToFirst() && c.getString(0) != null) return c.getString(0);
+    } catch (Exception ignored) {
+      // some apps share files without a name
+    }
+    String last = uri.getLastPathSegment();
+    return last != null ? last : "file";
+  }
+
+  /** The page's /__shared/<n>: a shared file, served as if the hub had it (same address, so the page reads it plainly). */
+  private android.webkit.WebResourceResponse sharedResponse(Uri uri) {
+    String hub = Hubs.hubUrl(this);
+    if (hub == null || !uri.toString().startsWith(hub) || uri.getPath() == null || !uri.getPath().startsWith("/__shared/")) return null;
+    try {
+      int i = Integer.parseInt(uri.getPath().substring("/__shared/".length()));
+      File file;
+      String mime;
+      synchronized (sharedFiles) {
+        file = sharedData.get(i);
+        mime = sharedFiles.get(i).getString("mime");
+      }
+      return new android.webkit.WebResourceResponse(mime, null, new java.io.FileInputStream(file));
+    } catch (Exception e) {
+      return new android.webkit.WebResourceResponse("text/plain", "utf-8", 404, "Not Found", null, new java.io.ByteArrayInputStream(new byte[0]));
+    }
+  }
+
+  /** Pairing links, notification taps and shares from other apps. Returns true when it took care of loading. */
   private boolean handle(Intent intent) {
+    if (Intent.ACTION_SEND.equals(intent.getAction()) || Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction())) {
+      takeShare(intent);
+      if (web.getUrl() == null) loadHub(null);
+      return true;
+    }
     Uri data = intent.getData();
     if (data != null && "allinone".equals(data.getScheme()) && "pair".equals(data.getHost())) {
       pair(data);
@@ -236,21 +346,21 @@ public class MainActivity extends Activity {
     String port = link.getQueryParameter("port");
     String code = link.getQueryParameter("code");
     if (host == null || code == null || !host.endsWith(".ts.net")) {
-      toast("二维码无效");
+      toast(Hubs.L("二维码无效", "Not a pairing code"));
       return;
     }
-    toast("正在配对…");
+    toast(Hubs.L("正在配对…", "Pairing…"));
     new Thread(() -> {
       try {
         String url = "https://" + host + ":" + (port != null ? port : Hubs.PORT) + "/api/pair?code=" + Uri.encode(code);
         JSONObject reply = new JSONObject(Hubs.get(url, 8000, 15000));
         Hubs.save(this, reply.getString("url"), reply.optJSONArray("members"));
         runOnUiThread(() -> {
-          toast("配对成功");
+          toast(Hubs.L("配对成功", "Paired"));
           loadHub(null);
         });
       } catch (Exception e) {
-        runOnUiThread(() -> toast("配对失败：" + e.getMessage() + "（请确认手机已连接 Tailscale）"));
+        runOnUiThread(() -> toast(Hubs.L("配对失败：" + e.getMessage() + "（请确认手机已连接 Tailscale）", "Pairing failed: " + e.getMessage() + " (is Tailscale on?)")));
       }
     }).start();
   }
@@ -343,7 +453,7 @@ public class MainActivity extends Activity {
   /** Into the phone's own collections, where the gallery and other apps find it: pictures, videos, music, else downloads. */
   private void saveFile(String url, String name, String mime) {
     if (!fromHub(url)) return;
-    toast("正在保存 " + name);
+    toast(Hubs.L("正在保存 ", "Saving ") + name);
     new Thread(() -> {
       try {
         Uri collection;
@@ -367,7 +477,7 @@ public class MainActivity extends Activity {
         values.put(MediaStore.MediaColumns.RELATIVE_PATH, folder + "/AgentChat");
         values.put(MediaStore.MediaColumns.IS_PENDING, 1);
         Uri item = getContentResolver().insert(collection, values);
-        if (item == null) throw new Exception("系统不让保存");
+        if (item == null) throw new Exception(Hubs.L("系统不让保存", "the system refused"));
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setConnectTimeout(8000);
         conn.setReadTimeout(60000);
@@ -383,10 +493,10 @@ public class MainActivity extends Activity {
         values.clear();
         values.put(MediaStore.MediaColumns.IS_PENDING, 0);
         getContentResolver().update(item, values, null, null);
-        String where = mime.startsWith("image/") ? "相册" : mime.startsWith("video/") ? "相册的视频" : mime.startsWith("audio/") ? "音乐" : "下载";
-        runOnUiThread(() -> toast("已保存到" + where + "（AgentChat 文件夹）"));
+        String where = mime.startsWith("image/") ? Hubs.L("相册", "Pictures") : mime.startsWith("video/") ? Hubs.L("相册的视频", "Movies") : mime.startsWith("audio/") ? Hubs.L("音乐", "Music") : Hubs.L("下载", "Downloads");
+        runOnUiThread(() -> toast(Hubs.L("已保存到" + where + "（AgentChat 文件夹）", "Saved to " + where + " (AgentChat folder)")));
       } catch (Exception e) {
-        runOnUiThread(() -> toast("保存失败：" + e.getMessage()));
+        runOnUiThread(() -> toast(Hubs.L("保存失败：", "Could not save: ") + e.getMessage()));
       }
     }).start();
   }
@@ -402,17 +512,17 @@ public class MainActivity extends Activity {
           Intent send = new Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri)
               .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
           send.setClipData(ClipData.newRawUri(name, uri));
-          startActivity(Intent.createChooser(send, "分享 " + name));
+          startActivity(Intent.createChooser(send, Hubs.L("分享 ", "Share ") + name));
         });
       } catch (Exception e) {
-        runOnUiThread(() -> toast("分享失败：" + e.getMessage()));
+        runOnUiThread(() -> toast(Hubs.L("分享失败：", "Could not share: ") + e.getMessage()));
       }
     }).start();
   }
 
   private void openFile(String url, String name, String mime) {
     if (!fromHub(url)) return; // only the hub's own files
-    toast("正在打开 " + name);
+    toast(Hubs.L("正在打开 ", "Opening ") + name);
     new Thread(() -> {
       try {
         File file = fetch(url, name);
@@ -425,12 +535,12 @@ public class MainActivity extends Activity {
             try {
               startActivity(Intent.createChooser(view, name));
             } catch (Exception e) {
-              toast("手机上没有能打开这种文件的应用");
+              toast(Hubs.L("手机上没有能打开这种文件的应用", "No app on this phone opens this kind of file"));
             }
           }
         });
       } catch (Exception e) {
-        runOnUiThread(() -> toast("打开失败：" + e.getMessage()));
+        runOnUiThread(() -> toast(Hubs.L("打开失败：", "Could not open: ") + e.getMessage()));
       }
     }).start();
   }
@@ -457,6 +567,18 @@ public class MainActivity extends Activity {
     /** A picture is open full screen: turning the phone turns it, even with the screen's rotation locked. */
     @JavascriptInterface public void viewerOpen(boolean open) {
       runOnUiThread(() -> setRequestedOrientation(open ? ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR : ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED));
+    }
+    /** What another app shared and the page has not taken yet: {files: [{name, mime, size}], text}, or null. */
+    @JavascriptInterface public String takeShared() {
+      synchronized (sharedFiles) {
+        if (!shareWaiting) return null;
+        shareWaiting = false;
+        try {
+          return new JSONObject().put("files", new org.json.JSONArray(sharedFiles)).put("text", sharedText != null ? sharedText : "").toString();
+        } catch (Exception e) {
+          return null;
+        }
+      }
     }
     @JavascriptInterface public void retry() {
       runOnUiThread(() -> loadHub(null));
@@ -543,7 +665,7 @@ public class MainActivity extends Activity {
       runOnUiThread(() -> {
         Uri uri = Uri.parse(link);
         if ("allinone".equals(uri.getScheme()) && "pair".equals(uri.getHost())) pair(uri);
-        else toast("二维码无效");
+        else toast(Hubs.L("二维码无效", "Not a pairing code"));
       });
     }
   }

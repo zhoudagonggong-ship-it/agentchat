@@ -45,9 +45,9 @@ public class PdfActivity extends Activity {
         lp.bottomMargin = gap;
         pages.addView(view, lp);
       }
-      if (renderer.getPageCount() > MAX_PAGES) Toast.makeText(this, "只显示前 " + MAX_PAGES + " 页", Toast.LENGTH_LONG).show();
+      if (renderer.getPageCount() > MAX_PAGES) Toast.makeText(this, Hubs.L("只显示前 " + MAX_PAGES + " 页", "Showing the first " + MAX_PAGES + " pages"), Toast.LENGTH_LONG).show();
     } catch (Exception e) {
-      Toast.makeText(this, "无法打开这个 PDF", Toast.LENGTH_LONG).show();
+      Toast.makeText(this, Hubs.L("无法打开这个 PDF", "Cannot open this PDF"), Toast.LENGTH_LONG).show();
       finish();
     }
   }

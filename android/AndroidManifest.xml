@@ -41,6 +41,13 @@
         <category android:name="android.intent.category.BROWSABLE" />
         <data android:scheme="allinone" android:host="pair" />
       </intent-filter>
+      <!-- Shared from another app (a picture, files, a link or text): into a conversation or the drive. -->
+      <intent-filter android:label="AgentChat">
+        <action android:name="android.intent.action.SEND" />
+        <action android:name="android.intent.action.SEND_MULTIPLE" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="*/*" />
+      </intent-filter>
     </activity>
 
     <activity android:name=".PdfActivity" android:exported="false"

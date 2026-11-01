@@ -7,7 +7,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Adapter, AdapterSink } from '../device.ts';
-import type { AgentInfo, Command, Item, ProjectInfo, SessionInfo } from '../../shared/protocol.ts';
+import type { AgentInfo, Command, Item, ProjectInfo, SessionInfo, WorkRule } from '../../shared/protocol.ts';
 import { carriesTag, recordsCall, withAttachments } from '../../shared/protocol.ts';
 import { debounce, log } from '../../shared/util.ts';
 import { normalizeMessages, textItemId, type OutputFile, type Run } from './normalize.ts';
@@ -19,6 +19,12 @@ const PREVIEW_MESSAGES = 8;
 const STARTUP_PREVIEWS = 40;
 const ITEMS_PER_MESSAGE = 200;
 const RECONNECT_MS = 5000;
+/** How often the commands conversations left running in the background are looked at. */
+const BACKGROUND_CHECK_MS = 30_000;
+/** The project folders looked at: those of conversations used within this (seconds). */
+const BACKGROUND_FOLDERS_S = 2 * 86_400;
+/** A command no longer running whose end OpenCode was not told of within this: it will not resume by itself. */
+const BACKGROUND_GRACE_MS = 3 * 60_000;
 const STATE_FILE = join(homedir(), '.local', 'state', 'opencode', 'service.json');
 
 function shorten(text: string | null): string | null {
@@ -100,6 +106,14 @@ export class OpenCodeAdapter implements Adapter {
   private readonly approvals = new Map<string, PendingApproval>();
   private readonly uploaded = new Set<string>();
   private readonly dirty = new Set<string>();
+  /** Background commands (shell IDs) seen no longer running while their conversation still waits on them: since when. */
+  private readonly stopped = new Map<string, number>();
+  /** Conversations whose background work ended without OpenCode resuming them: why, as the owner reads it. */
+  private readonly stranded = new Map<string, { shells: string[]; why: string; at: number }>();
+  /** Permission requests not found in OpenCode at the last look (see forgetDroppedApprovals). */
+  private readonly missing = new Set<string>();
+  /** Conversations with commands running in the background: how many. */
+  private readonly background = new Map<string, number>();
   private projects = new Map<string, { name: string; at: number }>();
   private relistNeeded = false;
   private refreshing = false;
@@ -118,6 +132,66 @@ export class OpenCodeAdapter implements Adapter {
     sink.sessions([...this.known.values()], true);
     void this.listen();
     void this.installTool();
+    setInterval(() => void this.watchBackground().catch((e) => log('opencode', `background check failed: ${(e as Error).message}`)), BACKGROUND_CHECK_MS).unref();
+  }
+
+  /**
+   * OpenCode resumes a conversation when a command it moved to the background ends, while OpenCode itself keeps
+   * running. Should the command vanish (OpenCode restarted, the process was killed) or end without it resuming, the
+   * conversation would wait for ever and nobody would know: its turn is then given up as failed, with the reason, so
+   * the owner and the agent that handed the work over hear of it.
+   */
+  private async watchBackground(): Promise<void> {
+    // OpenCode keeps one list of background commands per project folder: the folders of conversations used lately.
+    const since = Date.now() / 1000 - BACKGROUND_FOLDERS_S;
+    const folders = new Set([...this.known.values()].filter((s) => s.cwd && (s.updatedAt >= since || this.runs.get(s.threadId)?.waiting?.length))
+      .map((s) => s.cwd!));
+    const jobs = new Map<string, string>(); // shell ID -> status
+    const counts = new Map<string, number>(); // conversation -> commands running in its background
+    for (const cwd of folders) {
+      const res = await this.api<{ data: { id: string; status: string; metadata?: { sessionID?: string } }[] }>('GET', '/api/shell', undefined, true,
+        { 'x-opencode-directory': encodeURIComponent(cwd) });
+      for (const j of res.data) {
+        jobs.set(j.id, j.status);
+        const sid = j.metadata?.sessionID;
+        if (j.status === 'running' && sid) counts.set(sid, (counts.get(sid) ?? 0) + 1);
+      }
+    }
+    // The owner sees which conversations have work going on in the background.
+    const changed: SessionInfo[] = [];
+    for (const [id, s] of this.known) {
+      const n = counts.get(id) ?? 0;
+      if ((this.background.get(id) ?? 0) === n) continue;
+      if (n) this.background.set(id, n);
+      else this.background.delete(id);
+      const next = this.withState(s);
+      this.known.set(id, next);
+      changed.push(next);
+    }
+    if (changed.length) this.sink.sessions(changed, false);
+    await this.forgetDroppedApprovals();
+    for (const [threadId, run] of this.runs) {
+      if (!run.waiting?.length || run.running || this.active.has(threadId) || this.stranded.has(threadId)) continue;
+      const gone: string[] = [];
+      for (const id of run.waiting) {
+        if (jobs.get(id) === 'running') {
+          this.stopped.delete(id);
+          continue;
+        }
+        const since = this.stopped.get(id) ?? Date.now();
+        this.stopped.set(id, since);
+        if (Date.now() - since >= BACKGROUND_GRACE_MS) gone.push(id);
+        else this.markDirty(threadId); // its end may be in the conversation already: read it again
+      }
+      if (!gone.length) continue;
+      const ended = gone.filter((id) => jobs.has(id));
+      const why = ended.length
+        ? `后台任务已经结束（${ended.map((id) => jobs.get(id)).join('、')}），但 OpenCode 没有被叫醒接着做`
+        : '后台任务不见了，OpenCode 也没有收到它结束的通知（可能是 OpenCode 重启过，或任务被杀掉了）';
+      log('opencode', `${threadId}: background ${gone.join(', ')} stranded: ${why}`);
+      this.stranded.set(threadId, { shells: gone, why, at: Date.now() });
+      this.markDirty(threadId);
+    }
   }
 
   /** An approval or question waiting for the phone: after a restart we would no longer know it is there. */
@@ -166,6 +240,41 @@ export class OpenCodeAdapter implements Adapter {
     await this.api('PUT', `/api/experimental/mcp/${TOOL_NAME}${where}`, { config: { type: 'local', command: openCodeToolCommand(), timeout: { execution: 3_600_000 } } });
   }
 
+  /**
+   * Adds rules to a conversation's own (OpenCode checks them on every tool call): one for the same kind of tool and
+   * pattern takes the place of the one there; the others stay.
+   */
+  private async applyRules(threadId: string, rules: WorkRule[]): Promise<void> {
+    const res = await this.api<{ data: { permissions?: WorkRule[] } }>('GET', `/api/session/${encodeURIComponent(threadId)}`);
+    const key = (r: WorkRule) => `${r.action}\u0000${r.resource}`;
+    const fresh = new Set(rules.map(key));
+    const permissions = [...(res.data.permissions ?? []).filter((r) => !fresh.has(key(r))), ...rules];
+    await this.api('PATCH', `/api/session/${encodeURIComponent(threadId)}`, { permissions });
+    log('opencode', `${threadId}: rules now ${permissions.length}`);
+  }
+
+  /**
+   * Switches the conversation's model ("provider/model", or a model of its present provider) and its variant (the
+   * reasoning level, `effort`); either may be left out to keep what it has. A model or variant OpenCode does not offer
+   * fails the message, with the ones it does offer.
+   */
+  private async switchModel(threadId: string, model?: string, effort?: string): Promise<void> {
+    const res = await this.api<{ data: { model?: { id: string; providerID: string; variant?: string } } }>('GET', `/api/session/${encodeURIComponent(threadId)}`);
+    const now = res.data.model;
+    const [providerID, id] = model?.includes('/') ? [model.slice(0, model.indexOf('/')), model.slice(model.indexOf('/') + 1)] : [now?.providerID, model ?? now?.id];
+    if (!providerID || !id) throw new Error('模型要写成「提供方/模型名」，比如 deepseek/deepseek-v4-pro');
+    const list = await this.api<any[] | { data: any[] }>('GET', '/api/model');
+    const offered = (Array.isArray(list) ? list : list.data ?? []).find((m) => (m.providerID ?? m.provider?.id) === providerID && m.id === id);
+    if (!offered) throw new Error(`OpenCode 里没有模型 ${providerID}/${id}`);
+    const variants = (offered.variants ?? []).map((v: any) => String(v?.id ?? v));
+    if (effort && !variants.includes(effort)) throw new Error(`${providerID}/${id} 没有「${effort}」这一档，可选：${variants.join(' / ') || '（无）'}`);
+    const variant = effort ?? (model ? undefined : now?.variant);
+    await this.api('POST', `/api/session/${encodeURIComponent(threadId)}/model`, { model: { id, providerID, ...(variant ? { variant } : {}) } });
+    log('opencode', `${threadId}: model now ${providerID}/${id}${variant ? ` · ${variant}` : ''}`);
+    this.relistNeeded = true; // the list shows it
+    this.scheduleRefresh();
+  }
+
   hydrate(threadId: string): void {
     if (this.hydrated.has(threadId)) return;
     this.hydrated.add(threadId);
@@ -185,6 +294,10 @@ export class OpenCodeAdapter implements Adapter {
           await this.answerQuestion(threadId, String(question.item.data.approvalId), { [key]: command.text.trim() });
           return this.sink.receipt(requestId, 'accepted', question.item.turnId ?? undefined);
         }
+        // The rules the agent handing the work over set: the conversation's own, before it reads the message.
+        if (command.rules?.length) await this.applyRules(threadId, command.rules);
+        // The model it should work with from this message on.
+        if (command.model || command.effort) await this.switchModel(threadId, command.model, command.effort);
         // Every file is named by its path in the text; pictures also go in as attachments OpenCode can see.
         const text = withAttachments(command.text ?? '', files);
         const pictures = files.filter((f) => f.path && /^image\//.test(f.mime)).map((f) => ({ uri: pathToFileURL(f.path!).href, name: f.name }));
@@ -198,12 +311,14 @@ export class OpenCodeAdapter implements Adapter {
       case 'interrupt': {
         if (!this.active.has(threadId)) return this.sink.receipt(requestId, 'failed', undefined, 'no_active_turn');
         await this.api('POST', `/api/session/${encodeURIComponent(threadId)}/interrupt`);
+        // Stopping the turn drops what it was waiting for: so do its cards.
+        for (const [id, a] of [...this.approvals]) if (a.threadId === threadId) this.settleApproval(id, 'cancelled');
         return this.sink.receipt(requestId, 'accepted', this.turns.get(threadId));
       }
       case 'approve': {
         const pending = command.approvalId ? this.approvals.get(command.approvalId) : undefined;
         if (!pending || pending.threadId !== threadId) return this.sink.receipt(requestId, 'failed', undefined, 'approval_not_found');
-        const accept = command.decision === 'accept';
+        const accept = command.decision === 'accept' || command.decision === 'acceptForSession';
         if (pending.item.data.kind === 'question') {
           if (accept && command.answers) await this.answerQuestion(threadId, command.approvalId!, command.answers);
           else {
@@ -212,8 +327,16 @@ export class OpenCodeAdapter implements Adapter {
           }
           return this.sink.receipt(requestId, 'accepted', pending.item.turnId ?? undefined);
         }
-        await this.api('POST', `/api/session/${encodeURIComponent(threadId)}/permission/${encodeURIComponent(command.approvalId!)}/reply`,
-          { decision: accept ? 'once' : 'reject' });
+        try {
+          await this.api('POST', `/api/session/${encodeURIComponent(threadId)}/permission/${encodeURIComponent(command.approvalId!)}/reply`,
+            // Granted for the like of it: OpenCode keeps it as an allowed permission and asks no more.
+            { decision: command.decision === 'acceptForSession' ? 'always' : accept ? 'once' : 'reject', ...(command.note ? { message: command.note } : {}) });
+        } catch (error) {
+          if (!/NotFound/.test((error as Error).message)) throw error;
+          // OpenCode let it go already (its turn was stopped, say): the card goes too.
+          this.settleApproval(command.approvalId!, 'expired');
+          return this.sink.receipt(requestId, 'failed', undefined, 'approval_not_found');
+        }
         this.settleApproval(command.approvalId!, accept ? 'accepted' : 'declined');
         return this.sink.receipt(requestId, 'accepted', pending.item.turnId ?? undefined);
       }
@@ -225,21 +348,21 @@ export class OpenCodeAdapter implements Adapter {
   // ---------- server ----------
 
   /** One call to the local server. The desktop app may have restarted on another port: look it up again once. */
-  private async api<T = unknown>(method: string, path: string, body?: unknown, retry = true): Promise<T> {
+  private async api<T = unknown>(method: string, path: string, body?: unknown, retry = true, headers: Record<string, string> = {}): Promise<T> {
     const server = this.server ?? readServer();
     if (!server) throw new Error('opencode_not_running');
     let res: Response;
     try {
-      res = await fetch(server.url + path, { method, headers: { authorization: server.auth, ...(body ? { 'content-type': 'application/json' } : {}) },
+      res = await fetch(server.url + path, { method, headers: { authorization: server.auth, ...(body ? { 'content-type': 'application/json' } : {}), ...headers },
         body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(30_000) });
     } catch {
       this.server = readServer();
-      if (retry && this.server && this.server.url !== server.url) return this.api(method, path, body, false);
+      if (retry && this.server && this.server.url !== server.url) return this.api(method, path, body, false, headers);
       throw new Error('opencode_not_running');
     }
     if (res.status === 401 && retry) {
       this.server = readServer();
-      return this.api(method, path, body, false);
+      return this.api(method, path, body, false, headers);
     }
     const text = await res.text();
     if (!res.ok) throw new Error(`OpenCode ${res.status}: ${text.slice(0, 200)}`);
@@ -365,7 +488,10 @@ export class OpenCodeAdapter implements Adapter {
 
   private describe(s: any): SessionInfo {
     const cwd: string | null = s.location?.directory ?? null;
-    return { threadId: s.id, agentId: this.info.id, title: (s.title || this.previews.get(s.id) || '未命名对话').slice(0, 120), cwd,
+    // "deepseek/deepseek-v4-pro · high": the same words switch it (send's model and effort).
+    const m = s.model;
+    const model = m?.id ? `${m.providerID ? `${m.providerID}/` : ''}${m.id}${m.variant && m.variant !== 'default' ? ` · ${m.variant}` : ''}` : null;
+    return { threadId: s.id, agentId: this.info.id, title: (s.title || this.previews.get(s.id) || '未命名对话').slice(0, 120), cwd, model,
       updatedAt: Math.floor((Number(s.time?.updated) || 0) / 1000), running: false, activeTurnId: null, preview: null,
       projectId: s.projectID ?? null, projectName: null, pinned: false };
   }
@@ -374,7 +500,7 @@ export class OpenCodeAdapter implements Adapter {
   private withState(s: SessionInfo): SessionInfo {
     const running = this.active.has(s.threadId);
     const project = s.projectId ? this.projects.get(s.projectId) : undefined;
-    return { ...s, running, activeTurnId: running ? this.turns.get(s.threadId) ?? `run:${s.threadId}` : null,
+    return { ...s, running, background: this.background.get(s.threadId) ?? 0, activeTurnId: running ? this.turns.get(s.threadId) ?? `run:${s.threadId}` : null,
       preview: this.previews.get(s.threadId) ?? s.preview, projectName: project?.name ?? (s.cwd ? basename(s.cwd) : null) };
   }
 
@@ -416,6 +542,18 @@ export class OpenCodeAdapter implements Adapter {
     const { items, files, turnId, run, preview } = normalizeMessages(res.data.slice().reverse(), this.clientIds, this.runs.get(threadId));
     if (turnId) this.turns.set(threadId, turnId);
     if (run) this.runs.set(threadId, run);
+    // Background work that ended without OpenCode resuming the turn: the turn is given up, with the reason.
+    const stuck = this.stranded.get(threadId);
+    if (stuck && !run?.waiting?.some((id) => stuck.shells.includes(id))) {
+      this.stranded.delete(threadId); // it was resumed after all
+      for (const id of stuck.shells) this.stopped.delete(id);
+    } else if (stuck) {
+      for (const it of items) {
+        if (it.kind !== 'status' || it.itemId !== `turn:${run!.turn}` || !it.data.background) continue;
+        it.ts = stuck.at;
+        it.data = { ...it.data, status: 'failed', completedAt: Math.floor(stuck.at / 1000), error: stuck.why };
+      }
+    }
     const line = shorten(preview);
     if (line) this.previews.set(threadId, line);
     if (!full) return;
@@ -541,6 +679,25 @@ export class OpenCodeAdapter implements Adapter {
     this.approvals.set(p.id, { threadId: p.sessionID, item });
     log('opencode', `approval requested (${p.action})`);
     this.sink.items(p.sessionID, [item]);
+  }
+
+  /**
+   * Permission requests OpenCode no longer has (stopped on the computer, OpenCode restarted): their cards would wait
+   * for ever, and keep this computer from taking an update. Seen gone twice in a row, they go.
+   */
+  private async forgetDroppedApprovals(): Promise<void> {
+    const asks = [...this.approvals].filter(([, a]) => a.item.data.kind !== 'question');
+    if (!asks.length) return this.missing.clear();
+    const res = await this.api<any[] | { data: any[] }>('GET', '/api/permission/request');
+    const open = new Set((Array.isArray(res) ? res : res.data ?? []).map((p) => String(p?.id)));
+    for (const [id] of asks) {
+      if (open.has(id)) this.missing.delete(id);
+      else if (this.missing.has(id)) {
+        this.missing.delete(id);
+        log('opencode', `approval ${id} is gone in OpenCode: card closed`);
+        this.settleApproval(id, 'expired');
+      } else this.missing.add(id);
+    }
   }
 
   private settleApproval(id: string | undefined, state: string, answer?: string): void {

@@ -434,11 +434,8 @@ export class Worker {
       device.onVoice = (m) => voice.toHelper(m);
       voice.start();
     }
-    // Messages held back from an agent's window while the owner works: told in the same bubble (a click sends it in),
-    // counted in the tray's menu.
-    heldOutput((r) => {
-      if (this.underTray) process.stdout.write('@@alert ' + JSON.stringify(r) + '\n');
-    }, (count) => {
+    // Messages held back from an agent's window while the owner works: counted in the tray's menu, no bubble.
+    heldOutput((count) => {
       if (this.underTray) process.stdout.write(`@@held ${count}\n`);
     });
     this.detectAgents();
@@ -817,7 +814,7 @@ export class Worker {
           // The AgentChat tool (mcp.ts) of an agent on this computer: the hub lists agents, sends, waits.
           const op = String(body.op ?? '') as AskOp;
           const agentId = String(body.agent ?? '');
-          if (!['agents', 'send', 'wait', 'read', 'stop'].includes(op) || !this.device?.adapter(agentId)) return reply(400, { error: '不支持的操作或 Agent' });
+          if (!['agents', 'send', 'wait', 'read', 'stop', 'know', 'learn', 'import', 'approve'].includes(op) || !this.device?.adapter(agentId)) return reply(400, { error: '不支持的操作或 Agent' });
           const args = (body.args && typeof body.args === 'object' ? body.args : {}) as Record<string, unknown>;
           // Waiting takes the minutes asked; a send may first start a conversation on another computer (up to two minutes).
           const minutes = op === 'wait' ? Math.min(60, Math.max(0, Number(args.minutes ?? 10))) : op === 'send' ? 2.5 : 0;

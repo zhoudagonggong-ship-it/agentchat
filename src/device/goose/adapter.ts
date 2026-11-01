@@ -223,7 +223,7 @@ export class GooseAdapter implements Adapter {
       case 'approve': {
         const pending = command.approvalId ? this.approvals.get(command.approvalId) : undefined;
         if (!pending || pending.threadId !== threadId) return this.sink.receipt(requestId, 'failed', undefined, 'approval_not_found');
-        pending.answer(command.decision === 'accept' ? 'allow' : 'reject');
+        pending.answer(command.decision === 'accept' || command.decision === 'acceptForSession' ? 'allow' : 'reject');
         return this.sink.receipt(requestId, 'accepted', `run:${threadId}`);
       }
       default:

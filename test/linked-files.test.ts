@@ -24,7 +24,7 @@ test('files on this computer linked in a reply go to the hub with it, and the li
   const report = join(dir, '报告.md');
   writeFileSync(report, '# 报告');
   const text = `看图：\n\n![界面](<${shot}>)\n\n[完成报告](${report})；[网页](https://example.com) 和 [缺的](D:/nowhere/x.png) 不动。`;
-  const reply = (itemId: string) => ({ itemId, turnId: 't1', kind: 'message' as const, ts: 1, data: { role: 'assistant', text } });
+  const reply = (itemId: string) => ({ itemId, turnId: 't1', kind: 'message' as const, ts: Date.now(), data: { role: 'assistant', text } });
   sink.items('th1', [reply('m1')]);
   sink.items('th1', [reply('m1')]); // reported again: the files go once
 
@@ -39,6 +39,6 @@ test('files on this computer linked in a reply go to the hub with it, and the li
   assert.ok(shown.includes(`[完成报告](/files/${sha256(Buffer.from('# 报告'))})`));
   assert.ok(shown.includes('[网页](https://example.com)') && shown.includes('[缺的](D:/nowhere/x.png)'));
   // The owner's own messages are left as typed.
-  sink.items('th1', [{ itemId: 'u1', turnId: 't1', kind: 'message', ts: 2, data: { role: 'user', text: `![x](${shot})` } }]);
+  sink.items('th1', [{ itemId: 'u1', turnId: 't1', kind: 'message', ts: Date.now(), data: { role: 'user', text: `![x](${shot})` } }]);
   assert.equal((sent.at(-1) as any).items[0].data.text, `![x](${shot})`);
 });

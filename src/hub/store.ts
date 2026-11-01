@@ -1,7 +1,7 @@
 // Hub storage: one SQLite file plus content-addressed artifact files.
 // Every change bumps a global sequence number so apps can catch up with "everything after seq N".
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentInfo, Attachment, DeviceView, FriendView, Item, ItemView, MemberSeed, ProjectInfo, SessionInfo, SessionView } from '../shared/protocol.ts';
 import { markTag, sessionKey } from '../shared/protocol.ts';
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
 interface SessionRow { id: string; device_id: string; agent_id: string; thread_id: string; title: string; cwd: string | null;
   updated_at: number; running: number; active_turn_id: string | null; preview: string | null; hydrated: number; seq: number;
   project_id: string | null; project_name: string | null; pinned: number; muted: number; replies: number; read_replies: number;
-  quiet: number; read_quiet: number; cared_at: number | null }
+  quiet: number; read_quiet: number; cared_at: number | null; background: number; model: string | null }
 interface ItemRow { session_id: string; item_id: string; turn_id: string | null; kind: string; ts: number; data: string; seq: number }
 interface DeviceRow { id: string; name: string; secret_hash: string; approved: number; agents: string; last_seen: number }
 
@@ -79,6 +79,16 @@ export class Store {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN quiet INTEGER NOT NULL DEFAULT 0; ALTER TABLE sessions ADD COLUMN read_quiet INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE sessions ADD COLUMN cared_at INTEGER; UPDATE sessions SET cared_at = updated_at`);
     }
+    // Commands running in a conversation's background (SessionInfo.background).
+    if (!(this.db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[]).some((c) => c.name === 'background')) {
+      this.db.exec('ALTER TABLE sessions ADD COLUMN background INTEGER NOT NULL DEFAULT 0');
+    }
+    // The model a conversation works with (SessionInfo.model).
+    if (!(this.db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[]).some((c) => c.name === 'model')) {
+      this.db.exec('ALTER TABLE sessions ADD COLUMN model TEXT');
+    }
+    // Names conversations had before they were renamed (see formerlyNamed).
+    this.db.exec('CREATE TABLE IF NOT EXISTS former_titles (session_id TEXT NOT NULL, title TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (session_id, title))');
     const row =this.db.prepare("SELECT value FROM meta WHERE key = 'seq'").get() as { value: string } | undefined;
     this.seq = row ? Number(row.value) : 0;
     this.ledger = new Ledger(this.db, () => this.nextSeq());
@@ -263,9 +273,15 @@ export class Store {
         // A conversation's time is its latest activity, as in a chat app: it only moves on. An agent reporting an
         // older time than a message already brought (Codex keeps its own until it next touches the thread) changes nothing.
         const updatedAt = Math.max(old?.updated_at ?? 0, s.updatedAt);
+        // Renamed: the old name is remembered, for agents that still know it by that.
+        if (old && old.title !== s.title) {
+          this.db.prepare(`INSERT INTO former_titles(session_id, title, at) VALUES (?, ?, ?)
+            ON CONFLICT(session_id, title) DO UPDATE SET at = excluded.at`).run(id, old.title, Date.now());
+        }
         if (old && !old.archived && old.title === s.title && old.cwd === s.cwd && old.updated_at === updatedAt
           && Boolean(old.running) === s.running && old.active_turn_id === s.activeTurnId && (preview === null || old.preview === preview)
-          && old.project_id === projectId && old.project_name === projectName) continue;
+          && old.project_id === projectId && old.project_name === projectName && old.background === (s.background ?? 0)
+          && (s.model === undefined || old.model === s.model)) continue;
         const seq = this.nextSeq();
         // One more reply to read: a turn finished, or the latest message changed while nothing runs. A rename, or the
         // agent touching its own records, moves the time too but is no reply. A conversation seen the first time has none.
@@ -274,8 +290,11 @@ export class Store {
         const quiet = reply && this.fromAgent(id) ? 1 : 0;
         upsert.run(id, deviceId, agentId, s.threadId, s.title, s.cwd, s.updatedAt, s.running ? 1 : 0, s.activeTurnId, preview, projectId, projectName, seq,
           reply - quiet, quiet);
+        this.db.prepare('UPDATE sessions SET background = ? WHERE id = ?').run(s.background ?? 0, id);
+        // An agent that does not say keeps what was known.
+        if (s.model !== undefined) this.db.prepare('UPDATE sessions SET model = ? WHERE id = ?').run(s.model, id);
         const caredAt = reply && !quiet ? Math.max(old?.cared_at ?? 0, s.updatedAt) : (old?.cared_at ?? updatedAt);
-        changed.push({ ...s, updatedAt, preview: preview ?? old?.preview ?? null, projectId, projectName, pinned: Boolean(old?.pinned), muted: Boolean(old?.muted), id, deviceId, seq,
+        changed.push({ ...s, background: s.background ?? 0, model: s.model !== undefined ? s.model : (old?.model ?? null), updatedAt, preview: preview ?? old?.preview ?? null, projectId, projectName, pinned: Boolean(old?.pinned), muted: Boolean(old?.muted), id, deviceId, seq,
           replies: (old?.replies ?? 0) + reply - quiet, readReplies: old?.read_replies ?? 0, quiet: (old?.quiet ?? 0) + quiet, readQuiet: old?.read_quiet ?? 0, caredAt });
       }
       if (complete) {
@@ -358,11 +377,26 @@ export class Store {
       .all(deviceId, agentId, limit) as unknown as SessionRow[]).map(toSessionView);
   }
 
+  /** The live conversation of one agent that was called `title` before it was renamed (the latest renamed, if several). */
+  formerlyNamed(deviceId: string, agentId: string, title: string): SessionView | undefined {
+    const r = this.db.prepare(`SELECT s.* FROM former_titles f JOIN sessions s ON s.id = f.session_id
+      WHERE f.title = ? AND s.device_id = ? AND s.agent_id = ? AND s.archived = 0 AND s.title != f.title ORDER BY f.at DESC LIMIT 1`)
+      .get(title, deviceId, agentId) as SessionRow | undefined;
+    return r ? toSessionView(r) : undefined;
+  }
+
   /** How a turn stands by its status item: inProgress, completed, failed, interrupted; null before it has one. */
   turnStatus(sessionId: string, turnId: string): string | null {
     const r = this.db.prepare("SELECT json_extract(data, '$.status') AS s FROM items WHERE session_id = ? AND turn_id = ? AND kind = 'status' ORDER BY ts DESC LIMIT 1")
       .get(sessionId, turnId) as { s: string | null } | undefined;
     return r?.s ?? null;
+  }
+
+  /** Since when a turn waits on commands it moved to the background (null when it does not). */
+  turnBackground(sessionId: string, turnId: string): number | null {
+    const r = this.db.prepare(`SELECT json_extract(data, '$.status') AS s, json_extract(data, '$.idleAt') AS at, json_array_length(json_extract(data, '$.background')) AS n
+      FROM items WHERE session_id = ? AND turn_id = ? AND kind = 'status' ORDER BY ts DESC LIMIT 1`).get(sessionId, turnId) as { s: string; at: number | null; n: number | null } | undefined;
+    return r && r.s === 'inProgress' && r.n ? r.at ?? 0 : null;
   }
 
   /** Why a turn failed, as the agent reported it (null when it did not say). */
@@ -388,9 +422,12 @@ export class Store {
   }
 
   /** Approvals and questions in one conversation still waiting for the owner, raised since `since` (ms). */
-  waitingApprovals(sessionId: string, since: number): { kind: string; what: string }[] {
-    return (this.db.prepare("SELECT json_extract(data, '$.kind') AS k, json_extract(data, '$.command') AS c, json_extract(data, '$.reason') AS r FROM items WHERE session_id = ? AND kind = 'approval_request' AND json_extract(data, '$.state') = 'pending' AND ts >= ?")
-      .all(sessionId, since - 60_000) as { k: string; c: string | null; r: string | null }[]).map((x) => ({ kind: x.k, what: x.c ?? x.r ?? '' }));
+  waitingApprovals(sessionId: string, since: number): { approval: string; kind: string; what: string; routed: boolean }[] {
+    return (this.db.prepare(`SELECT json_extract(data, '$.approvalId') AS a, json_extract(data, '$.kind') AS k, json_extract(data, '$.command') AS c,
+      json_extract(data, '$.reason') AS r, json_extract(data, '$.routedTo') AS t FROM items WHERE session_id = ? AND kind = 'approval_request'
+      AND json_extract(data, '$.state') = 'pending' AND ts >= ?`)
+      .all(sessionId, since - 60_000) as { a: string; k: string; c: string | null; r: string | null; t: string | null }[])
+      .map((x) => ({ approval: x.a, kind: x.k, what: x.c ?? x.r ?? '', routed: x.t !== null }));
   }
 
   setHydrated(id: string): void {
@@ -452,6 +489,84 @@ export class Store {
   }
 
   /**
+   * The items that are not history (see HISTORY_MS): ones of turns with something after `cutoff`, here or in the same
+   * batch, and approvals still waiting. A computer reading a conversation again reports all of it; the old part stays out.
+   */
+  notHistory(sessionId: string, items: Item[], cutoff: number): Item[] {
+    const last = new Map<string, number>();
+    const stmt = this.db.prepare('SELECT MAX(ts) AS ts FROM items WHERE session_id = ? AND turn_id = ?');
+    for (const i of items) {
+      if (!i.turnId) continue;
+      if (!last.has(i.turnId)) last.set(i.turnId, (stmt.get(sessionId, i.turnId) as { ts: number | null }).ts ?? 0);
+      last.set(i.turnId, Math.max(last.get(i.turnId)!, i.ts));
+    }
+    return items.filter((i) => (i.turnId ? last.get(i.turnId)! : i.ts) >= cutoff || (i.kind === 'approval_request' && i.data.state === 'pending'));
+  }
+
+  /**
+   * Lets up to `limit` items of history go: turns whose latest item is from before `cutoff`, and items outside a turn
+   * from before it, except approvals still waiting and the turn a conversation is running. Returns how many went.
+   */
+  forgetItems(cutoff: number, limit: number): number {
+    return Number(this.db.prepare(`DELETE FROM items WHERE rowid IN (SELECT i.rowid FROM items i
+      LEFT JOIN (SELECT session_id, turn_id, MAX(ts) AS last FROM items WHERE turn_id IS NOT NULL GROUP BY session_id, turn_id) t
+        ON t.session_id = i.session_id AND t.turn_id = i.turn_id
+      LEFT JOIN sessions s ON s.id = i.session_id
+      WHERE COALESCE(t.last, i.ts) < ?
+        AND NOT (i.kind = 'approval_request' AND json_extract(i.data, '$.state') = 'pending')
+        AND NOT (i.turn_id IS NOT NULL AND s.running = 1 AND s.active_turn_id = i.turn_id)
+      LIMIT ?)`).run(cutoff, limit).changes);
+  }
+
+  /** Lets settled requests from before `cutoff` go (ones still owing their sender an outcome stay). */
+  forgetRequests(cutoff: number): number {
+    return Number(this.db.prepare(`DELETE FROM requests WHERE created_at < ? AND state IN ('delivered', 'failed', 'cancelled')
+      AND (owed IS NULL OR owed != 'due')`).run(cutoff).changes);
+  }
+
+  /**
+   * Lets files go that nothing kept names any more (no item, request or friend's picture), except ones that came after
+   * `cutoff` (on their way into a message still); and files on disk the record does not know. Returns how many, how big.
+   */
+  forgetFiles(cutoff: number): { files: number; bytes: number } {
+    const named = new Set<string>();
+    const add = (text: string | null) => { for (const m of text?.match(/[0-9a-f]{64}/g) ?? []) named.add(m); };
+    for (const r of this.db.prepare(`SELECT data FROM items WHERE kind = 'artifact' OR data LIKE '%sha256%' OR data LIKE '%/files/%'`).all() as { data: string }[]) add(r.data);
+    for (const r of this.db.prepare('SELECT payload FROM requests').all() as { payload: string }[]) add(r.payload);
+    for (const r of this.db.prepare('SELECT avatar FROM friends WHERE avatar IS NOT NULL').all() as { avatar: string }[]) named.add(r.avatar);
+    const gone = (this.db.prepare('SELECT sha256, size FROM artifacts WHERE created_at < ?').all(cutoff) as { sha256: string; size: number }[])
+      .filter((a) => !named.has(a.sha256));
+    const drop = this.db.prepare('DELETE FROM artifacts WHERE sha256 = ?');
+    let bytes = 0;
+    for (const a of gone) {
+      drop.run(a.sha256);
+      rmSync(join(this.artifactDir, a.sha256), { force: true });
+      bytes += a.size;
+    }
+    let files = gone.length;
+    const known = new Set((this.db.prepare('SELECT sha256 FROM artifacts').all() as { sha256: string }[]).map((r) => r.sha256));
+    for (const f of readdirSync(this.artifactDir)) {
+      if (known.has(f)) continue;
+      const path = join(this.artifactDir, f);
+      const info = statSync(path, { throwIfNoEntry: false });
+      if (!info?.isFile() || info.mtimeMs >= Date.now() - 3_600_000) continue; // one being written just now
+      rmSync(path, { force: true });
+      files++;
+      bytes += info.size;
+    }
+    return { files, bytes };
+  }
+
+  /** Gives the room history left back to the disk, once it is worth it (more than `over` bytes unused). */
+  compact(over: number): boolean {
+    const page = (this.db.prepare('PRAGMA page_size').get() as { page_size: number }).page_size;
+    const free = (this.db.prepare('PRAGMA freelist_count').get() as { freelist_count: number }).freelist_count;
+    if (free * page < over) return false;
+    this.db.exec('VACUUM');
+    return true;
+  }
+
+  /**
    * When an output file belongs in the conversation: right after the rest of its turn. Files of earlier
    * turns can arrive much later (a computer reading an old conversation for the first time).
    */
@@ -486,10 +601,17 @@ export class Store {
     return rows.reverse().map(toItemView);
   }
 
+  /** The conversation's last `limit` items in the order they happened (an old one read again does not move to the end). */
+  latestItems(sessionId: string, limit: number): ItemView[] {
+    const rows = this.db.prepare('SELECT * FROM items WHERE session_id = ? ORDER BY ts DESC, seq DESC LIMIT ?').all(sessionId, limit) as unknown as ItemRow[];
+    return rows.reverse().map(toItemView);
+  }
+
   /** Approvals still waiting for an answer, across all live conversations. */
   pendingApprovals(): ItemView[] {
     return (this.db.prepare(`SELECT i.* FROM items i JOIN sessions s ON s.id = i.session_id
-      WHERE i.kind = 'approval_request' AND json_extract(i.data, '$.state') = 'pending' AND s.archived = 0 ORDER BY i.ts DESC LIMIT 50`).all() as unknown as ItemRow[]).map(toItemView);
+      WHERE i.kind = 'approval_request' AND json_extract(i.data, '$.state') = 'pending' AND json_extract(i.data, '$.routedTo') IS NULL
+      AND s.archived = 0 ORDER BY i.ts DESC LIMIT 50`).all() as unknown as ItemRow[]).map(toItemView);
   }
 
   /** Output files across all live conversations, newest first. */
@@ -522,7 +644,7 @@ function byAgent(text: string): boolean {
 
 function toSessionView(r: SessionRow): SessionView {
   return { id: r.id, deviceId: r.device_id, agentId: r.agent_id, threadId: r.thread_id, title: r.title, cwd: r.cwd,
-    updatedAt: r.updated_at, running: Boolean(r.running), activeTurnId: r.active_turn_id, preview: r.preview,
+    updatedAt: r.updated_at, running: Boolean(r.running), background: r.background ?? 0, model: r.model ?? null, activeTurnId: r.active_turn_id, preview: r.preview,
     projectId: r.project_id, projectName: r.project_name, pinned: Boolean(r.pinned), muted: Boolean(r.muted), replies: r.replies, readReplies: r.read_replies,
     quiet: r.quiet ?? 0, readQuiet: r.read_quiet ?? 0, caredAt: r.cared_at ?? r.updated_at, seq: r.seq };
 }

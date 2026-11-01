@@ -26,6 +26,10 @@ export interface SessionInfo {
   cwd: string | null;
   updatedAt: number; // seconds since epoch, as reported by the agent
   running: boolean;
+  /** Commands still running in its background (the agent's own turn may have ended): how many. */
+  background?: number;
+  /** The model it works with, as its agent names it, and the reasoning level: "gpt-6.1-terra · high". */
+  model?: string | null;
   activeTurnId: string | null;
   /** Latest message, shortened, for the conversation list. */
   preview: string | null;
@@ -44,7 +48,7 @@ export interface FriendView { deviceId: string; agentId: string; added: boolean;
 
 /** The owner's settings the hub keeps. `agentLinks`: agents may reach each other through AgentChat. */
 /** `autoReport`: when work one agent handed another ends, its report goes back into the sender's conversation. */
-/** `followMe`: while the owner uses one of the computers, reminders show there and the phone stays quiet. */
+/** `followMe`: while the owner uses one of the computers the phone stays quiet, but for approvals. */
 /** `voiceMic`: the computer whose microphone voice input listens with (the one the owner sits at), by device id. */
 export interface HubSettings { agentLinks: boolean; autoReport: boolean; followMe: boolean; voiceMic?: string | null; /** a newer release the owner can install */ newVersion?: string;
   /** The order in which computers take over as hub (ids; see shift.ts). */ line?: string[] }
@@ -58,7 +62,8 @@ export interface Item {
 }
 
 export type CommandOp = 'send' | 'interrupt' | 'approve' | 'cancel';
-export type ApprovalDecision = 'accept' | 'decline' | 'cancel';
+/** acceptForSession: this one and the like of it from now on (Codex: for the rest of the turn; OpenCode: always). */
+export type ApprovalDecision = 'accept' | 'acceptForSession' | 'decline' | 'cancel';
 
 export interface Command {
   requestId: string;
@@ -72,6 +77,13 @@ export interface Command {
   answers?: Record<string, string>;
   /** Sent by an agent through AgentChat rather than by the owner's phone. */
   origin?: Origin;
+  /** The rules the agent handing the work over sets for the conversation it goes to (send; agents that support them). */
+  rules?: WorkRule[];
+  /** Said with an approval's answer (why it was refused, what to do instead), where the agent takes it. */
+  note?: string;
+  /** The model the conversation works with from this message on, and its reasoning level (send; Codex, OpenCode). */
+  model?: string;
+  effort?: string;
   /**
    * The hub sends a message again (it was not found where it should be): 1, 2… The computer looks for it first and
    * types it only when it is not there yet.
@@ -85,14 +97,27 @@ export interface Command {
  */
 export interface Origin { deviceId: string; agentId: string; label: string; depth?: number; /** the sender's conversation, when known */ sessionId?: string }
 
+/**
+ * A rule for the agent doing handed-over work: what it may do (`action`: the kind of tool, e.g. edit, shell, read),
+ * on what (`resource`: a wildcard pattern on the file path or the command), and how: allowed, refused, or asked of
+ * the agent that handed the work over (ask).
+ */
+export interface WorkRule { action: string; resource: string; effect: 'allow' | 'deny' | 'ask' }
+
 /** What an agent may ask its computer's AgentChat (and the hub) through the AgentChat tool. */
-export type AskOp = 'agents' | 'send' | 'wait' | 'read' | 'stop';
+export type AskOp = 'agents' | 'send' | 'wait' | 'read' | 'stop' | 'know' | 'learn' | 'import' | 'approve';
 
 /** A file the phone sent. `path` is filled in on the device once it is saved there. */
 export interface Attachment { sha256: string; name: string; size: number; mime: string; path?: string }
 
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export const MAX_ATTACHMENTS = 9;
+
+/**
+ * How long the hub keeps a finished turn (by its latest item), with the files it names: after that it is history, which
+ * the computers keep in the agents' own records. The phone is for the day's work.
+ */
+export const HISTORY_MS = 24 * 3_600_000;
 
 /** How a message tells the agent about its files: one marked line each, after the text. The app hides these lines again. */
 export const ATTACHMENT_MARK = '[附件]';

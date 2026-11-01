@@ -5,7 +5,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { basename, extname, join } from 'node:path';
 import type { AgentInfo, AskOp, Attachment, Command, DeviceToHub, HubRef, HubToDevice, Item, MemberSeed, ProjectInfo, RequestState, SessionInfo } from '../shared/protocol.ts';
-import { PROTOCOL_VERSION, callKey, markTag } from '../shared/protocol.ts';
+import { HISTORY_MS, PROTOCOL_VERSION, callKey, markTag } from '../shared/protocol.ts';
 import { log, sha256 } from '../shared/util.ts';
 import { activity } from '../activity.ts';
 import type { Transport } from '../link.ts';
@@ -162,6 +162,8 @@ export class Device {
   private askSeq = 0;
   private readonly linkedFiles = new Set<string>(); // agent|thread|sha256 of files linked in replies, sent to the hub
   private readonly linkCache = new Map<string, { sha256: string; data: Buffer; mtimeMs: number }>();
+  /** Each turn's latest item as reported (agent|thread|turn): a turn read again from long ago is history (HISTORY_MS). */
+  private readonly turnLast = new Map<string, number>();
   private readonly id: string;
   private readonly name: string;
   private readonly secret: string;
@@ -545,14 +547,15 @@ export class Device {
         this.lastProjects.set(agentId, projects);
         if (this.active) this.transport.send({ t: 'projects', agentId, projects });
       },
-      items: (threadId, items) => {
+      items: (threadId, all) => {
+        const items = this.notHistory(agentId, threadId, all);
         if (items.length) this.enqueue({ t: 'items', agentId, threadId, items: items.map((i) => this.linkFiles(agentId, threadId, i)) });
       },
       artifact: (threadId, itemId, turnId, path) => {
-        if (isOutput(path)) void this.uploadArtifact(agentId, threadId, itemId, turnId, path);
+        if (isOutput(path) && !this.historic(agentId, threadId, turnId)) void this.uploadArtifact(agentId, threadId, itemId, turnId, path);
       },
       artifactData: (threadId, itemId, turnId, name, mime, data, sent) => {
-        if (data.length > MAX_ARTIFACT_BYTES) return;
+        if (data.length > MAX_ARTIFACT_BYTES || this.historic(agentId, threadId, turnId)) return;
         this.enqueue({ t: 'artifact', agentId, threadId, itemId, turnId, name, size: data.length, sha256: sha256(data), mime,
           data: data.toString('base64'), ...(sent ? { sent: true } : {}) });
       },
@@ -568,6 +571,24 @@ export class Device {
         else if (state === 'failed') this.verifying.delete(requestId);
       },
     };
+  }
+
+  /**
+   * The items that are not history: an agent reading a conversation again (the hub asks for it on every reconnect)
+   * reports all of it, and the hub keeps only the last day's (its turns with anything since, waiting approvals).
+   */
+  private notHistory(agentId: string, threadId: string, items: Item[]): Item[] {
+    const key = (turnId: string) => `${agentId}|${threadId}|${turnId}`;
+    for (const i of items) if (i.turnId) this.turnLast.set(key(i.turnId), Math.max(this.turnLast.get(key(i.turnId)) ?? 0, i.ts));
+    if (this.turnLast.size > 20_000) for (const k of [...this.turnLast.keys()].slice(0, 5_000)) this.turnLast.delete(k);
+    const cutoff = Date.now() - HISTORY_MS;
+    return items.filter((i) => (i.turnId ? this.turnLast.get(key(i.turnId))! : i.ts) >= cutoff || (i.kind === 'approval_request' && i.data.state === 'pending'));
+  }
+
+  /** Whether a turn is history (its latest item reported is from before HISTORY_MS): its files stay here. */
+  private historic(agentId: string, threadId: string, turnId: string | null): boolean {
+    const last = turnId ? this.turnLast.get(`${agentId}|${threadId}|${turnId}`) : undefined;
+    return last !== undefined && last < Date.now() - HISTORY_MS;
   }
 
   /**

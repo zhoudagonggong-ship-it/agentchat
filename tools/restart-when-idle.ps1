@@ -30,5 +30,9 @@ try {
 Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'tray\.ps1|src[\\/]main\.ts' -and $_.CommandLine -match [regex]::Escape($root) } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force -Confirm:$false }
 Start-Sleep 2
-wscript (Join-Path $root 'AllinOne.vbs')
+# Started by Windows (WMI), not as a child of this script: run from a Claude Code session, a child stays in the
+# desktop app's job and is killed with it when the app quits, the hub with no hand-over.
+$vbs = Join-Path $root 'AllinOne.vbs'
+$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = "wscript.exe `"$vbs`"" }
+if ($r.ReturnValue -ne 0) { wscript $vbs }
 "restarted $(Get-Date -Format HH:mm:ss)"

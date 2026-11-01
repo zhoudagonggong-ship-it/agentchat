@@ -32,14 +32,18 @@
       </section>
       <section class="page" data-page="library">
         <header class="bar"><h1>资料库</h1></header>
-        <div id="lib-tabs" class="chips lib-tabs"><button data-lib="chat" class="on">聊天文件</button><button data-lib="drive">网盘</button></div>
+        <div id="lib-tabs" class="chips lib-tabs"><button data-lib="chat" class="on">聊天文件</button><button data-lib="drive">网盘</button><button data-lib="know">员工守则</button></div>
         <div class="search lib-chat"><input id="files-q" type="search" placeholder="搜索文件或对话"></div>
         <div id="files-filter" class="chips lib-chat"></div>
         <div id="files-all" class="scroll lib-chat"></div>
         <div id="drive-bar" class="drive-bar lib-drive" hidden><div id="drive-crumbs" class="crumbs"></div>
           <button id="drive-mkdir" class="link">新建文件夹</button><button id="drive-upload" class="link">上传</button>
           <input id="drive-input" type="file" multiple hidden></div>
+        <div id="drive-pending" class="drive-pending" hidden><span id="drive-pending-text"></span>
+          <button id="drive-here" class="btn">存到这里</button><button id="drive-here-cancel" class="link">取消</button></div>
         <div id="drive" class="scroll lib-drive" hidden></div>
+        <div class="search lib-know" hidden><input id="know-q" type="search" placeholder="搜索员工守则"></div>
+        <div id="know" class="scroll lib-know" hidden></div>
       </section>
       <nav id="nav" class="nav">
         <button data-tab="project"><i class="ico ico-project"></i>Agent</button>
@@ -94,6 +98,18 @@
       <div id="right-body" class="scroll"></div>
     </section>
   </div>
+  <!-- Shared from another app: pick the conversation it goes to, or the drive -->
+  <div id="share" class="sheet share-sheet" hidden>
+    <div class="sheet-card">
+      <div class="grip"></div>
+      <div class="share-head"><b>分享到</b><button id="share-cancel" class="link">取消</button></div>
+      <div id="share-what" class="share-what"></div>
+      <input id="share-q" type="search" placeholder="搜索对话或 Agent">
+      <div id="share-list" class="sheet-list"></div>
+    </div>
+  </div>
+  <!-- Outside the panes: they redraw while the photo picker is open, and a redrawn input would lose the choice -->
+  <input type="file" id="avatar-file" accept="image/*" hidden>
   <div id="toast" class="toast" role="status"></div>
   <script type="module" src="app.js"></script>
 </body>

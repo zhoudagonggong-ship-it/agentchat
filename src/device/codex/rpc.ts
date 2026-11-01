@@ -59,6 +59,12 @@ export class CodexRpc {
     this.child?.kill();
   }
 
+  /** Stops for good and forgets its process (a conversation's own app-server, its turn over). */
+  close(): void {
+    this.stop();
+    if (this.pidFile) rmSync(this.pidFile, { force: true });
+  }
+
   /**
    * Closes the app-server on purpose; the next call starts a fresh one. An app-server keeps every conversation it
    * ran a turn in to itself until it exits (`thread/unsubscribe` does not let go of it), and the desktop app cannot
@@ -133,10 +139,15 @@ export class CodexRpc {
    * A force-killed program leaves its app-server behind (Windows does not end child processes).
    * Close the one we started last time, after checking it really is a bare `codex.exe app-server`.
    */
-  private async reapLeftover(): Promise<void> {
-    if (!this.pidFile || !existsSync(this.pidFile) || process.platform !== 'win32') return;
-    const pid = Number(readFileSync(this.pidFile, 'utf8'));
-    rmSync(this.pidFile, { force: true });
+  private reapLeftover(): Promise<void> {
+    return CodexRpc.reap(this.pidFile);
+  }
+
+  /** Closes the app-server a pid file names, if it is still there and really one (see reapLeftover). */
+  static async reap(pidFile: string | null): Promise<void> {
+    if (!pidFile || !existsSync(pidFile) || process.platform !== 'win32') return;
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    rmSync(pidFile, { force: true });
     if (!Number.isInteger(pid) || pid <= 0) return;
     try {
       const { stdout } = await run('powershell.exe', ['-NoProfile', '-Command',
