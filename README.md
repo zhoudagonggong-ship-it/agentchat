@@ -49,7 +49,8 @@ Agents on different computers, from different makers, can talk to each other for
 ```
    Phone (AgentChat app)
           │
-     Tailscale encrypted network (yours, free)
+     your own Tailscale network
+     or an AgentChat account (through our relay server)
           │
    Hub (one computer that stays on)
      ┌────┴─────┬──────────┐
@@ -57,8 +58,11 @@ Agents on different computers, from different makers, can talk to each other for
   Claude Code  Codex      OpenCode / Goose / DSH
 ```
 
-- **No third-party servers.** Your phone and computers join your own private network with [Tailscale](https://tailscale.com); conversations are stored only on your own computers.
-- **Official interfaces only.** Agents are connected through the interfaces their makers provide: nothing is cracked or patched. Each agent's account, model and keys stay in its own app.
+- **Your conversations stay on your computers.** Conversations, files and command history are stored only on your own computers. Our servers don't keep any of it.
+- **Two ways to connect.**
+  - **With [Tailscale](https://tailscale.com)**: phone and computers talk over your own encrypted Tailscale network. AgentChat doesn't go through our servers; how Tailscale handles data is governed by its own privacy policy.
+  - **With an account**: the connection between your computers and phone is forwarded by our relay server. The content is encrypted, and the server doesn't keep it. The account keeps only your phone number or email address, plus your device names and whether they're online, to sign you in and find your devices.
+- **How agents are connected.** AgentChat doesn't crack any agent and doesn't modify their program files. It connects in two ways: through the local interfaces the agents provide, or by reading the conversation records they keep on your computer. A few agents also need a plugin or one added setting (a plugin for DSH, hooks settings for Claude Code). Each agent's account, model and keys stay in its own app, and its own terms still apply between you and it.
 - **One program on every computer.** One computer that stays on acts as the hub, linking your phone and the other computers; you can move the hub to another computer at any time.
 
 ## Set up in three steps
@@ -96,9 +100,15 @@ Install an agent on any of your computers, open it and sign in once. Within two 
 
 ## FAQ
 
-**Does it cost anything?** AgentChat is free, and so is Tailscale's personal plan. Whatever the agents themselves cost stays the same.
+**Does it cost anything?** It's free for now. Connecting with an account is free too; if you connect with Tailscale, Tailscale's personal plan is also free. Whatever the agents themselves cost stays the same.
 
-**Is it safe?** Phone and computers talk over your own encrypted Tailscale network, which nobody else can join. AgentChat goes through no outside server and collects no data. All the code is open, so you can check for yourself.
+**Is it safe?**
+- Conversations, files and command history are stored only on your own computers. Our servers don't keep any of it.
+- With Tailscale: phone and computers talk over your own encrypted Tailscale network. AgentChat doesn't go through our servers; how Tailscale handles data is governed by its own privacy policy.
+- With an account: the connection between your computers and phone is forwarded by our relay server. The content is encrypted, and the server doesn't keep it. The account keeps only your phone number or email address, plus your device names and whether they're online, to sign you in and find your devices.
+- Updates: checking for a new version visits GitHub, only downloads the installer, and uploads nothing of yours.
+- Diagnostics: a diagnostics package is made only when you click "Export". Passwords and keys are removed, it stays on your computer, and you decide whether to send it to us.
+- All the code is open, so you can check for yourself.
 
 **iPhone?** Open the web version in the browser and "Add to Home Screen". It works, but without background notifications. The app is Android only for now.
 
